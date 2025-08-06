@@ -1875,6 +1875,7 @@ fn queue_incomplete_load_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, SamplingRequest};
 
     #[test]
     fn test_sanitize_server_name() {
@@ -1899,7 +1900,6 @@ mod tests {
 
     #[test]
     fn test_sampling_approval_dialog_formatting() {
-        use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, SamplingRequest};
 
         // Test single message formatting
         let request = SamplingRequest {
@@ -1922,5 +1922,337 @@ mod tests {
         assert_eq!(request.server_name, "test-server");
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].content.text, "What is the capital of France?");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_single_message() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-123".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: Some("Be helpful".to_string()),
+            max_tokens: Some(1000),
+        };
+
+        let edited_content = r#"
+# MCP Sampling Request from 'test-server'
+# Edit the messages below. Lines starting with # are comments.
+
+user: What is the capital of France?
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.server_name, "test-server");
+        assert_eq!(result.request_id, "req-123");
+        assert_eq!(result.system_prompt, Some("Be helpful".to_string()));
+        assert_eq!(result.max_tokens, Some(1000));
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text, "What is the capital of France?");
+        assert_eq!(result.messages[0].content.content_type, "text");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_multi_message() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-456".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+# This is a comment and should be ignored
+user: What is the capital of France?
+
+---
+
+assistant: The capital of France is Paris.
+
+---
+
+user: What about Germany?
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.messages.len(), 3);
+        
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text, "What is the capital of France?");
+        
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content.text, "The capital of France is Paris.");
+        
+        assert_eq!(result.messages[2].role, "user");
+        assert_eq!(result.messages[2].content.text, "What about Germany?");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_case_insensitive_roles() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-789".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+USER: This is a user message
+ASSISTANT: This is an assistant message  
+System: This is a system message
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[2].role, "system");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_multiline_messages() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-multiline".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+user: Please help me with this code:
+```python
+def hello():
+    print("Hello, world!")
+```
+What does this function do?
+
+---
+
+assistant: This Python function does the following:
+1. Defines a function named `hello`
+2. Prints "Hello, world!" to the console
+3. It's a simple greeting function
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.messages.len(), 2);
+        
+        let expected_user_content = r#"Please help me with this code:
+```python
+def hello():
+print("Hello, world!")
+```
+What does this function do?"#;
+        assert_eq!(result.messages[0].content.text, expected_user_content);
+        
+        let expected_assistant_content = r#"This Python function does the following:
+1. Defines a function named `hello`
+2. Prints "Hello, world!" to the console
+3. It's a simple greeting function"#;
+        assert_eq!(result.messages[1].content.text, expected_assistant_content);
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_comments_filtered() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-comments".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+# This is a comment
+# Another comment
+user: This is the actual message
+# This comment should be ignored
+# Even this one
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text, "This is the actual message");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_whitespace_handling() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-whitespace".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+
+    user:    This message has extra whitespace    
+
+    ---    
+
+    assistant:     This response also has whitespace     
+
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text, "This message has extra whitespace");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content.text, "This response also has whitespace");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_invalid_role() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-invalid".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+invalid_role: This should be ignored
+user: This should be parsed
+assistant: This should also be parsed
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text, "This should be parsed");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content.text, "This should also be parsed");
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_empty_content() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-empty".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+# Only comments here
+# No actual messages
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request);
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No valid messages found"));
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_empty_string() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-empty-string".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let result = parse_edited_sampling_content("", &original_request);
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No valid messages found"));
+    }
+
+    #[test]
+    fn test_parse_edited_sampling_content_role_without_content() {
+
+        let original_request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-no-content".to_string(),
+            messages: vec![],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let edited_content = r#"
+user:
+assistant: This has content
+"#;
+
+        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
+        
+        // Should still parse the empty user message and the assistant message
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text, "");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content.text, "This has content");
+    }
+
+    #[test]
+    fn test_format_sampling_request_for_editor() {
+
+        let request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-format".to_string(),
+            messages: vec![
+                McpSamplingMessage {
+                    role: "user".to_string(),
+                    content: McpSamplingContent {
+                        content_type: "text".to_string(),
+                        text: "What is the capital of France?".to_string(),
+                    },
+                },
+                McpSamplingMessage {
+                    role: "assistant".to_string(),
+                    content: McpSamplingContent {
+                        content_type: "text".to_string(),
+                        text: "The capital of France is Paris.".to_string(),
+                    },
+                },
+            ],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        let formatted = format_sampling_request_for_editor(&request);
+        
+        assert!(formatted.contains("# MCP Sampling Request from 'test-server'"));
+        assert!(formatted.contains("# Available roles: user, assistant, system"));
+        assert!(formatted.contains("user: What is the capital of France?"));
+        assert!(formatted.contains("---"));
+        assert!(formatted.contains("assistant: The capital of France is Paris."));
     }
 }
