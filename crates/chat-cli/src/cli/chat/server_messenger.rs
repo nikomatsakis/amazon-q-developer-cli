@@ -11,6 +11,7 @@ use crate::mcp_client::{
     ResourceTemplatesListResult,
     ResourcesListResult,
     ToolsListResult,
+    SamplingRequest,
 };
 
 #[allow(dead_code)]
@@ -34,6 +35,9 @@ pub enum UpdateEventMessage {
     },
     InitStart {
         server_name: String,
+    },
+    SamplingRequest {
+        request: SamplingRequest,
     },
 }
 
@@ -123,6 +127,14 @@ impl Messenger for ServerMessenger {
             .send(UpdateEventMessage::InitStart {
                 server_name: self.server_name.clone(),
             })
+            .await
+            .map_err(|e| MessengerError::Custom(e.to_string()))?)
+    }
+
+    async fn send_sampling_request(&self, request: SamplingRequest) -> Result<(), MessengerError> {
+        Ok(self
+            .update_event_sender
+            .send(UpdateEventMessage::SamplingRequest { request })
             .await
             .map_err(|e| MessengerError::Custom(e.to_string()))?)
     }

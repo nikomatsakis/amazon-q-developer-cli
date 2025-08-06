@@ -24,6 +24,8 @@ use super::transport::base_protocol::{
     JsonRpcNotification,
     JsonRpcRequest,
     JsonRpcVersion,
+    JsonRpcResponse as JsonRpcResponseMessage,
+    JsonRpcError,
 };
 use super::transport::stdio::JsonRpcStdioTransport;
 use super::transport::{
@@ -44,10 +46,12 @@ use super::{
     ServerCapabilities,
     ToolsListResult,
 };
+use super::error::ErrorCode;
 use crate::util::process::{
     Pid,
     terminate_process,
 };
+use super::sampling::parse_sampling_request;
 
 pub type ClientInfo = serde_json::Value;
 pub type StdioTransport = JsonRpcStdioTransport;
@@ -371,7 +375,73 @@ where
                 match listener.recv().await {
                     Ok(msg) => {
                         match msg {
-                            JsonRpcMessage::Request(_req) => {},
+                            JsonRpcMessage::Request(req) => {
+                                let JsonRpcRequest { id, method, params, .. } = req;
+                                match method.as_str() {
+                                    "sampling/createMessage" => {
+                                        if let Some(ref messenger) = messenger_ref {
+                                            match parse_sampling_request(
+                                                server_name.clone(),
+                                                id.to_string(),
+                                                params,
+                                            ) {
+                                                Ok(sampling_request) => {
+                                                    if let Err(e) = messenger.send_sampling_request(sampling_request).await {
+                                                        tracing::error!(
+                                                            "Failed to send sampling request from {}: {:?}",
+                                                            server_name,
+                                                            e
+                                                        );
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    tracing::error!(
+                                                        "Failed to parse sampling request from {}: {}",
+                                                        server_name,
+                                                        e
+                                                    );
+                                                    // Send JSON-RPC error response back to server
+                                                    if let Err(response_err) = client_ref.send_error_response(
+                                                        id.to_string(),
+                                                        ErrorCode::InvalidParams,
+                                                        format!("Failed to parse sampling request: {}", e),
+                                                    ).await {
+                                                        tracing::error!(
+                                                            "Failed to send error response to {}: {:?}",
+                                                            server_name,
+                                                            response_err
+                                                        );
+                                                    }
+                                                },
+                                            }
+                                        } else {
+                                            tracing::warn!(
+                                                "Received sampling request from {} but no messenger available",
+                                                server_name
+                                            );
+                                            // Send JSON-RPC error response back to server
+                                            if let Err(response_err) = client_ref.send_error_response(
+                                                id.to_string(),
+                                                ErrorCode::InternalError,
+                                                "No messenger available to handle sampling request".to_string(),
+                                            ).await {
+                                                tracing::error!(
+                                                    "Failed to send error response to {}: {:?}",
+                                                    server_name,
+                                                    response_err
+                                                );
+                                            }
+                                        }
+                                    },
+                                    _ => {
+                                        tracing::debug!(
+                                            "Received unhandled request method '{}' from {}",
+                                            method,
+                                            server_name
+                                        );
+                                    },
+                                }
+                            },
                             JsonRpcMessage::Notification(notif) => {
                                 let JsonRpcNotification { method, params, .. } = notif;
                                 match method.as_str() {
@@ -582,6 +652,35 @@ where
                 .await
                 .map_err(send_map_err)??,
         )
+    }
+
+    /// Sends a JSON-RPC error response back to the server
+    /// Used when we need to respond to a server request with an error
+    async fn send_error_response(
+        &self,
+        request_id: String,
+        error_code: ErrorCode,
+        error_message: String,
+    ) -> Result<(), ClientError> {
+        let error_response = JsonRpcResponseMessage {
+            jsonrpc: JsonRpcVersion::default(),
+            id: request_id.parse::<u64>().unwrap_or(0),
+            result: None,
+            error: Some(JsonRpcError {
+                code: error_code.into(),
+                message: error_message,
+                data: None,
+            }),
+        };
+        
+        let msg = JsonRpcMessage::Response(error_response);
+        let send_map_err = |e: Elapsed| (e, "error_response".to_string());
+        
+        time::timeout(Duration::from_millis(self.timeout), self.transport.send(&msg))
+            .await
+            .map_err(send_map_err)??;
+            
+        Ok(())
     }
 
     fn get_id(&self) -> u64 {

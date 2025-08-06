@@ -596,6 +596,15 @@ impl ToolManagerBuilder {
                         pending_clone.write().await.insert(server_name.clone());
                         loading_servers.insert(server_name, std::time::Instant::now());
                     },
+                    UpdateEventMessage::SamplingRequest { request } => {
+                        // TODO: Implement sampling request handling
+                        // For now, just log that we received a sampling request
+                        tracing::info!(
+                            "Received sampling request from server '{}' with request_id '{}'",
+                            request.server_name,
+                            request.request_id
+                        );
+                    },
                 }
             }
         });
