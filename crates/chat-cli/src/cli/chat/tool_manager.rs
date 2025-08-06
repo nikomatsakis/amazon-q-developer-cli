@@ -1473,9 +1473,21 @@ fn messages_have_changed(
 fn open_editor_for_sampling(
     request: &crate::mcp_client::SamplingRequest,
 ) -> eyre::Result<crate::mcp_client::SamplingRequest> {
-    use uuid::Uuid;
-    
     // Format the sampling request as editable text
+    let formatted_content = format_sampling_request_for_editor(request);
+    
+    // Use the existing editor functionality
+    match crate::cli::chat::cli::editor::open_editor(Some(formatted_content)) {
+        Ok(edited_content) => {
+            // Parse the edited content back into a SamplingRequest
+            parse_edited_sampling_content(&edited_content, request)
+        },
+        Err(e) => Err(eyre::eyre!("Editor failed: {}", e)),
+    }
+}
+
+/// Format sampling request for editor display
+fn format_sampling_request_for_editor(request: &crate::mcp_client::SamplingRequest) -> String {
     let mut content = String::new();
     content.push_str(&format!("# MCP Sampling Request from '{}'\n", request.server_name));
     content.push_str("# Edit the messages below. Lines starting with # are comments and will be ignored.\n");
@@ -1489,53 +1501,7 @@ fn open_editor_for_sampling(
         content.push_str(&format!("{}: {}\n", message.role, message.content.text));
     }
     
-    // Create a temporary file with a unique name
-    let temp_dir = std::env::temp_dir();
-    let file_name = format!("q_sampling_{}.md", Uuid::new_v4());
-    let temp_file_path = temp_dir.join(file_name);
-
-    // Write initial content to the file
-    std::fs::write(&temp_file_path, &content)
-        .map_err(|e| eyre::eyre!("Failed to create temporary file: {}", e))?;
-
-    // Get the editor from environment variable or use a default
-    let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-
-    // Parse the editor command to handle arguments
-    let mut parts = shlex::split(&editor_cmd)
-        .ok_or_else(|| eyre::eyre!("Failed to parse EDITOR command"))?;
-
-    if parts.is_empty() {
-        return Err(eyre::eyre!("EDITOR environment variable is empty"));
-    }
-
-    let editor_bin = parts.remove(0);
-
-    // Open the editor with the parsed command and arguments
-    let mut cmd = std::process::Command::new(editor_bin);
-    // Add any arguments that were part of the EDITOR variable
-    for arg in parts {
-        cmd.arg(arg);
-    }
-    // Add the file path as the last argument
-    let status = cmd
-        .arg(&temp_file_path)
-        .status()
-        .map_err(|e| eyre::eyre!("Failed to open editor: {}", e))?;
-
-    if !status.success() {
-        return Err(eyre::eyre!("Editor exited with non-zero status"));
-    }
-
-    // Read the content back
-    let edited_content = std::fs::read_to_string(&temp_file_path)
-        .map_err(|e| eyre::eyre!("Failed to read temporary file: {}", e))?;
-
-    // Clean up the temporary file
-    let _ = std::fs::remove_file(&temp_file_path);
-
-    // Parse the edited content back into a SamplingRequest
-    parse_edited_sampling_content(&edited_content, request)
+    content
 }
 
 /// Parse edited sampling content back into a SamplingRequest
