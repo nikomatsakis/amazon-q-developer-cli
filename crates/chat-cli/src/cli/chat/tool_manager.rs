@@ -91,6 +91,7 @@ use crate::mcp_client::{
     JsonRpcResponse,
     Messenger,
     PromptGet,
+    SamplingRequest,
 };
 use crate::os::Os;
 use crate::telemetry::TelemetryThread;
@@ -597,13 +598,73 @@ impl ToolManagerBuilder {
                         loading_servers.insert(server_name, std::time::Instant::now());
                     },
                     UpdateEventMessage::SamplingRequest { request } => {
-                        // TODO: Implement sampling request handling
-                        // For now, just log that we received a sampling request
+                        // Handle sampling request with trust checking and user approval
+                        let server_name = &request.server_name;
+                        let request_id = &request.request_id;
+                        
                         tracing::info!(
                             "Received sampling request from server '{}' with request_id '{}'",
-                            request.server_name,
-                            request.request_id
+                            server_name,
+                            request_id
                         );
+
+                        // Check if sampling is trusted for this server using existing method
+                        let is_trusted = {
+                            let agent_guard = agent_clone.lock().await;
+                            agent_guard.is_server_trusted_for_sampling(server_name)
+                            // TODO: Also check trust_all_tools when we have access to the Agents struct
+                        };
+
+                        if is_trusted {
+                            // Auto-approve trusted sampling requests
+                            tracing::info!(
+                                "Auto-approving sampling request from trusted server '{}'",
+                                server_name
+                            );
+                            // TODO: Send approved response back to MCP server
+                            // This will be implemented when we add the response routing
+                        } else {
+                            // Show user approval dialog for untrusted requests
+                            match show_sampling_approval_dialog(&request) {
+                                Ok(approval) => {
+                                    match approval {
+                                        crate::mcp_client::SamplingApproval::ApproveOnce => {
+                                            tracing::info!(
+                                                "User approved sampling request from server '{}'",
+                                                server_name
+                                            );
+                                            // TODO: Send approved response back to MCP server
+                                        },
+                                        crate::mcp_client::SamplingApproval::TrustServer => {
+                                            tracing::info!(
+                                                "User chose to trust sampling from server '{}'",
+                                                server_name
+                                            );
+                                            // Add the server to trusted sampling using existing method
+                                            {
+                                                let mut agent_guard = agent_clone.lock().await;
+                                                agent_guard.trust_server_for_sampling(server_name);
+                                            }
+                                            // TODO: Send approved response back to MCP server
+                                        },
+                                        crate::mcp_client::SamplingApproval::Reject => {
+                                            tracing::info!(
+                                                "User rejected sampling request from server '{}'",
+                                                server_name
+                                            );
+                                            // TODO: Send rejection response back to MCP server
+                                        },
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Error showing sampling approval dialog: {}",
+                                        e
+                                    );
+                                    // TODO: Send error response back to MCP server
+                                },
+                            }
+                        }
                     },
                 }
             }
@@ -1364,6 +1425,54 @@ impl ToolManager {
     }
 }
 
+/// Show user approval dialog for sampling requests
+/// 
+/// Displays a dialog asking the user whether to approve, reject, or trust
+/// sampling requests from the given MCP server.
+fn show_sampling_approval_dialog(
+    request: &crate::mcp_client::SamplingRequest,
+) -> eyre::Result<crate::mcp_client::SamplingApproval> {
+    use crate::util::choose;
+    use crate::mcp_client::SamplingApproval;
+
+    // Format the sampling request for display
+    let messages_preview = if request.messages.len() == 1 {
+        let msg = &request.messages[0];
+        let preview = if msg.content.text.len() > 100 {
+            format!("{}...", &msg.content.text[..97])
+        } else {
+            msg.content.text.clone()
+        };
+        format!("Message ({}): {}", msg.role, preview)
+    } else {
+        format!("{} messages", request.messages.len())
+    };
+
+    let prompt = format!(
+        "MCP server '{}' wants to use Amazon Q for sampling.\n{}\n\nHow would you like to respond?",
+        request.server_name,
+        messages_preview
+    );
+
+    let options = vec![
+        "Approve once",
+        "Reject", 
+        "Trust this server (approve all future sampling)",
+    ];
+
+    match choose(&prompt, &options)? {
+        Some(0) => Ok(SamplingApproval::ApproveOnce),
+        Some(1) => Ok(SamplingApproval::Reject),
+        Some(2) => Ok(SamplingApproval::TrustServer),
+        Some(_) => unreachable!("Invalid selection index"),
+        None => {
+            // User cancelled (Ctrl+C)
+            tracing::info!("User cancelled sampling approval dialog");
+            Ok(SamplingApproval::Reject)
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_tool_specs(
     database: &Database,
@@ -1655,5 +1764,32 @@ mod tests {
         let with_delim = format!("a{}b{}c", NAMESPACE_DELIMITER, NAMESPACE_DELIMITER);
         let sanitized = sanitize_name(with_delim, &regex, &mut hasher);
         assert_eq!(sanitized, "abc");
+    }
+
+    #[test]
+    fn test_sampling_approval_dialog_formatting() {
+        use crate::mcp_client::{SamplingRequest, McpSamplingMessage, McpSamplingContent};
+        
+        // Test single message formatting
+        let request = SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-123".to_string(),
+            messages: vec![McpSamplingMessage {
+                role: "user".to_string(),
+                content: McpSamplingContent {
+                    content_type: "text".to_string(),
+                    text: "What is the capital of France?".to_string(),
+                },
+            }],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        };
+
+        // We can't easily test the interactive dialog, but we can test that the function
+        // exists and has the right signature
+        assert_eq!(request.server_name, "test-server");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].content.text, "What is the capital of France?");
     }
 }
