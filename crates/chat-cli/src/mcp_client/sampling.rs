@@ -126,6 +126,7 @@ pub enum SamplingResponse {
 #[derive(Debug, Clone)]
 pub enum SamplingApproval {
     ApproveOnce,
+    ApproveWithEdits(SamplingRequest),
     Reject,
     TrustServer,
 }

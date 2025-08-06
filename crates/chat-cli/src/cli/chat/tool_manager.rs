@@ -1,78 +1,30 @@
 use std::borrow::Borrow;
-use std::collections::{
-    HashMap,
-    HashSet,
-};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::hash::{
-    DefaultHasher,
-    Hasher,
-};
-use std::io::{
-    BufWriter,
-    Write,
-};
+use std::hash::{DefaultHasher, Hasher};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
-use std::sync::{
-    Arc,
-    RwLock as SyncRwLock,
-};
-use std::time::{
-    Duration,
-    Instant,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock as SyncRwLock};
+use std::time::{Duration, Instant};
 
-use crossterm::{
-    cursor,
-    execute,
-    queue,
-    style,
-    terminal,
-};
+use crossterm::{cursor, execute, queue, style, terminal};
 use eyre::Report;
-use futures::{
-    StreamExt,
-    future,
-    stream,
-};
+use futures::{StreamExt, future, stream};
 use regex::Regex;
 use tokio::signal::ctrl_c;
-use tokio::sync::{
-    Mutex,
-    Notify,
-    RwLock,
-};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{
-    error,
-    warn,
-};
+use tracing::{error, warn};
 
-use crate::api_client::model::{
-    ToolResult,
-    ToolResultContentBlock,
-    ToolResultStatus,
-};
-use crate::cli::agent::{
-    Agent,
-    McpServerConfig,
-};
+use crate::api_client::model::{ToolResult, ToolResultContentBlock, ToolResultStatus};
+use crate::cli::agent::{Agent, McpServerConfig};
 use crate::cli::chat::cli::prompts::GetPromptError;
 use crate::cli::chat::consts::DUMMY_TOOL_NAME;
 use crate::cli::chat::message::AssistantToolUse;
-use crate::cli::chat::server_messenger::{
-    ServerMessengerBuilder,
-    UpdateEventMessage,
-};
-use crate::cli::chat::tools::custom_tool::{
-    CustomTool,
-    CustomToolClient,
-};
+use crate::cli::chat::server_messenger::{ServerMessengerBuilder, UpdateEventMessage};
+use crate::cli::chat::tools::custom_tool::{CustomTool, CustomToolClient};
 use crate::cli::chat::tools::execute::ExecuteCommand;
 use crate::cli::chat::tools::fs_read::FsRead;
 use crate::cli::chat::tools::fs_write::FsWrite;
@@ -80,19 +32,10 @@ use crate::cli::chat::tools::gh_issue::GhIssue;
 use crate::cli::chat::tools::knowledge::Knowledge;
 use crate::cli::chat::tools::thinking::Thinking;
 use crate::cli::chat::tools::use_aws::UseAws;
-use crate::cli::chat::tools::{
-    Tool,
-    ToolOrigin,
-    ToolSpec,
-};
+use crate::cli::chat::tools::{Tool, ToolOrigin, ToolSpec};
 use crate::database::Database;
 use crate::database::settings::Setting;
-use crate::mcp_client::{
-    JsonRpcResponse,
-    Messenger,
-    PromptGet,
-    SamplingRequest,
-};
+use crate::mcp_client::{JsonRpcResponse, Messenger, PromptGet, SamplingRequest};
 use crate::os::Os;
 use crate::telemetry::TelemetryThread;
 use crate::util::MCP_SERVER_TOOL_DELIMITER;
@@ -601,7 +544,7 @@ impl ToolManagerBuilder {
                         // Handle sampling request with trust checking and user approval
                         let server_name = &request.server_name;
                         let request_id = &request.request_id;
-                        
+
                         tracing::info!(
                             "Received sampling request from server '{}' with request_id '{}'",
                             server_name,
@@ -617,10 +560,7 @@ impl ToolManagerBuilder {
 
                         if is_trusted {
                             // Auto-approve trusted sampling requests
-                            tracing::info!(
-                                "Auto-approving sampling request from trusted server '{}'",
-                                server_name
-                            );
+                            tracing::info!("Auto-approving sampling request from trusted server '{}'", server_name);
                             // TODO: Send approved response back to MCP server
                             // This will be implemented when we add the response routing
                         } else {
@@ -634,6 +574,14 @@ impl ToolManagerBuilder {
                                                 server_name
                                             );
                                             // TODO: Send approved response back to MCP server
+                                        },
+                                        crate::mcp_client::SamplingApproval::ApproveWithEdits(edited_request) => {
+                                            tracing::info!(
+                                                "User approved edited sampling request from server '{}'",
+                                                server_name
+                                            );
+                                            // TODO: Send edited request response back to MCP server
+                                            // The edited_request contains the user's modifications
                                         },
                                         crate::mcp_client::SamplingApproval::TrustServer => {
                                             tracing::info!(
@@ -657,10 +605,7 @@ impl ToolManagerBuilder {
                                     }
                                 },
                                 Err(e) => {
-                                    tracing::error!(
-                                        "Error showing sampling approval dialog: {}",
-                                        e
-                                    );
+                                    tracing::error!("Error showing sampling approval dialog: {}", e);
                                     // TODO: Send error response back to MCP server
                                 },
                             }
@@ -989,10 +934,12 @@ impl ToolManager {
 
                 tool_specs.remove("execute_bash");
 
-                tool_specs.insert("execute_cmd".to_string(), ToolSpec {
-                    name: "execute_cmd".to_string(),
-                    description: "Execute the specified Windows command.".to_string(),
-                    input_schema: InputSchema(json!({
+                tool_specs.insert(
+                    "execute_cmd".to_string(),
+                    ToolSpec {
+                        name: "execute_cmd".to_string(),
+                        description: "Execute the specified Windows command.".to_string(),
+                        input_schema: InputSchema(json!({
                     "type": "object",
                     "properties": {
                     "command": {
@@ -1005,8 +952,9 @@ impl ToolManager {
                     }
                     },
                         "required": ["command"]})),
-                    tool_origin: ToolOrigin::Native,
-                });
+                        tool_origin: ToolOrigin::Native,
+                    },
+                );
             }
 
             tool_specs
@@ -1426,51 +1374,265 @@ impl ToolManager {
 }
 
 /// Show user approval dialog for sampling requests
-/// 
-/// Displays a dialog asking the user whether to approve, reject, or trust
-/// sampling requests from the given MCP server.
+///
+/// Displays a dialog asking the user whether to approve, reject, trust, or edit
+/// sampling requests from the given MCP server. The edit option allows users to
+/// modify the request content and then returns to the approval dialog.
 fn show_sampling_approval_dialog(
     request: &crate::mcp_client::SamplingRequest,
 ) -> eyre::Result<crate::mcp_client::SamplingApproval> {
-    use crate::util::choose;
     use crate::mcp_client::SamplingApproval;
+    use crate::util::choose;
 
-    // Format the sampling request for display
-    let messages_preview = if request.messages.len() == 1 {
-        let msg = &request.messages[0];
-        let preview = if msg.content.text.len() > 100 {
-            format!("{}...", &msg.content.text[..97])
+    let mut current_request = request.clone();
+    
+    loop {
+        // Format the current sampling request for display
+        let messages_preview = if current_request.messages.len() == 1 {
+            let msg = &current_request.messages[0];
+            let preview = if msg.content.text.len() > 100 {
+                format!("{}...", &msg.content.text[..97])
+            } else {
+                msg.content.text.clone()
+            };
+            format!("> {}: {}", msg.role, preview)
         } else {
-            msg.content.text.clone()
+            format!("{} messages", current_request.messages.len())
         };
-        format!("Message ({}): {}", msg.role, preview)
-    } else {
-        format!("{} messages", request.messages.len())
-    };
 
-    let prompt = format!(
-        "MCP server '{}' wants to use Amazon Q for sampling.\n{}\n\nHow would you like to respond?",
-        request.server_name,
-        messages_preview
-    );
+        let prompt = format!(
+            "MCP server '{}' wants to use Amazon Q:\n{}\n\nHow would you like to respond?",
+            current_request.server_name, messages_preview
+        );
 
-    let options = vec![
-        "Approve once",
-        "Reject", 
-        "Trust this server (approve all future sampling)",
-    ];
+        let options = vec![
+            "Approve once",
+            "Edit in editor",
+            "Reject",
+            "Trust this server (approve all future sampling)",
+        ];
 
-    match choose(&prompt, &options)? {
-        Some(0) => Ok(SamplingApproval::ApproveOnce),
-        Some(1) => Ok(SamplingApproval::Reject),
-        Some(2) => Ok(SamplingApproval::TrustServer),
-        Some(_) => unreachable!("Invalid selection index"),
-        None => {
-            // User cancelled (Ctrl+C)
-            tracing::info!("User cancelled sampling approval dialog");
-            Ok(SamplingApproval::Reject)
-        },
+        match choose(&prompt, &options)? {
+            Some(0) => {
+                // If content was edited, return the edited version
+                if messages_have_changed(&current_request.messages, &request.messages) {
+                    return Ok(SamplingApproval::ApproveWithEdits(current_request));
+                } else {
+                    return Ok(SamplingApproval::ApproveOnce);
+                }
+            },
+            Some(1) => {
+                // Open editor with the current sampling request content
+                match open_editor_for_sampling(&current_request) {
+                    Ok(edited_request) => {
+                        current_request = edited_request;
+                        // Continue the loop to show the dialog again with edited content
+                        continue;
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to open editor for sampling request: {}", e);
+                        // Continue the loop to let user try again or choose different option
+                        continue;
+                    }
+                }
+            },
+            Some(2) => return Ok(SamplingApproval::Reject),
+            Some(3) => return Ok(SamplingApproval::TrustServer),
+            Some(_) => unreachable!("Invalid selection index"),
+            None => {
+                // User cancelled (Ctrl+C)
+                tracing::info!("User cancelled sampling approval dialog");
+                return Ok(SamplingApproval::Reject);
+            },
+        }
     }
+}
+
+/// Check if sampling messages have been modified
+fn messages_have_changed(
+    current: &[crate::mcp_client::McpSamplingMessage],
+    original: &[crate::mcp_client::McpSamplingMessage],
+) -> bool {
+    if current.len() != original.len() {
+        return true;
+    }
+    
+    for (curr, orig) in current.iter().zip(original.iter()) {
+        if curr.role != orig.role || curr.content.text != orig.content.text {
+            return true;
+        }
+    }
+    
+    false
+}
+
+/// Open editor for sampling request editing
+///
+/// Formats the sampling request as human-readable text, opens it in the user's
+/// preferred editor, and parses the result back into a SamplingRequest.
+fn open_editor_for_sampling(
+    request: &crate::mcp_client::SamplingRequest,
+) -> eyre::Result<crate::mcp_client::SamplingRequest> {
+    use uuid::Uuid;
+    
+    // Format the sampling request as editable text
+    let mut content = String::new();
+    content.push_str(&format!("# MCP Sampling Request from '{}'\n", request.server_name));
+    content.push_str("# Edit the messages below. Lines starting with # are comments and will be ignored.\n");
+    content.push_str("# Format: ROLE: message content\n");
+    content.push_str("# Available roles: user, assistant, system\n\n");
+    
+    for (i, message) in request.messages.iter().enumerate() {
+        if i > 0 {
+            content.push_str("\n---\n\n");
+        }
+        content.push_str(&format!("{}: {}\n", message.role, message.content.text));
+    }
+    
+    // Create a temporary file with a unique name
+    let temp_dir = std::env::temp_dir();
+    let file_name = format!("q_sampling_{}.md", Uuid::new_v4());
+    let temp_file_path = temp_dir.join(file_name);
+
+    // Write initial content to the file
+    std::fs::write(&temp_file_path, &content)
+        .map_err(|e| eyre::eyre!("Failed to create temporary file: {}", e))?;
+
+    // Get the editor from environment variable or use a default
+    let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+
+    // Parse the editor command to handle arguments
+    let mut parts = shlex::split(&editor_cmd)
+        .ok_or_else(|| eyre::eyre!("Failed to parse EDITOR command"))?;
+
+    if parts.is_empty() {
+        return Err(eyre::eyre!("EDITOR environment variable is empty"));
+    }
+
+    let editor_bin = parts.remove(0);
+
+    // Open the editor with the parsed command and arguments
+    let mut cmd = std::process::Command::new(editor_bin);
+    // Add any arguments that were part of the EDITOR variable
+    for arg in parts {
+        cmd.arg(arg);
+    }
+    // Add the file path as the last argument
+    let status = cmd
+        .arg(&temp_file_path)
+        .status()
+        .map_err(|e| eyre::eyre!("Failed to open editor: {}", e))?;
+
+    if !status.success() {
+        return Err(eyre::eyre!("Editor exited with non-zero status"));
+    }
+
+    // Read the content back
+    let edited_content = std::fs::read_to_string(&temp_file_path)
+        .map_err(|e| eyre::eyre!("Failed to read temporary file: {}", e))?;
+
+    // Clean up the temporary file
+    let _ = std::fs::remove_file(&temp_file_path);
+
+    // Parse the edited content back into a SamplingRequest
+    parse_edited_sampling_content(&edited_content, request)
+}
+
+/// Parse edited sampling content back into a SamplingRequest
+fn parse_edited_sampling_content(
+    content: &str,
+    original_request: &crate::mcp_client::SamplingRequest,
+) -> eyre::Result<crate::mcp_client::SamplingRequest> {
+    use crate::mcp_client::{McpSamplingMessage, McpSamplingContent};
+    
+    let mut messages = Vec::new();
+    let mut current_role = String::new();
+    let mut current_content = String::new();
+    let mut in_message = false;
+    
+    for line in content.lines() {
+        let line = line.trim();
+        
+        // Skip comments and empty lines
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        
+        // Check for separator
+        if line == "---" {
+            // Finish current message if we have one
+            if in_message && !current_role.is_empty() {
+                messages.push(McpSamplingMessage {
+                    role: current_role.clone(),
+                    content: McpSamplingContent {
+                        content_type: "text".to_string(),
+                        text: current_content.trim().to_string(),
+                    },
+                });
+                current_role.clear();
+                current_content.clear();
+                in_message = false;
+            }
+            continue;
+        }
+        
+        // Check for role: content pattern
+        if let Some(colon_pos) = line.find(':') {
+            let potential_role = line[..colon_pos].trim().to_lowercase();
+            if matches!(potential_role.as_str(), "user" | "assistant" | "system") {
+                // Finish previous message if we have one
+                if in_message && !current_role.is_empty() {
+                    messages.push(McpSamplingMessage {
+                        role: current_role.clone(),
+                        content: McpSamplingContent {
+                            content_type: "text".to_string(),
+                            text: current_content.trim().to_string(),
+                        },
+                    });
+                }
+                
+                // Start new message
+                current_role = potential_role;
+                current_content = line[colon_pos + 1..].trim().to_string();
+                in_message = true;
+                continue;
+            }
+        }
+        
+        // If we're in a message, append to content
+        if in_message {
+            if !current_content.is_empty() {
+                current_content.push('\n');
+            }
+            current_content.push_str(line);
+        }
+    }
+    
+    // Finish the last message
+    if in_message && !current_role.is_empty() {
+        messages.push(McpSamplingMessage {
+            role: current_role,
+            content: McpSamplingContent {
+                content_type: "text".to_string(),
+                text: current_content.trim().to_string(),
+            },
+        });
+    }
+    
+    // If no messages were parsed, return an error
+    if messages.is_empty() {
+        return Err(eyre::eyre!("No valid messages found in edited content"));
+    }
+    
+    // Create new request with edited messages
+    Ok(crate::mcp_client::SamplingRequest {
+        server_name: original_request.server_name.clone(),
+        request_id: original_request.request_id.clone(),
+        messages,
+        model_preferences: original_request.model_preferences.clone(),
+        system_prompt: original_request.system_prompt.clone(),
+        max_tokens: original_request.max_tokens,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1514,10 +1676,13 @@ async fn process_tool_specs(
             out_of_spec_tool_names.push(OutOfSpecName::EmptyDescription(spec.name.clone()));
             continue;
         }
-        tn_map.insert(model_tool_name.clone(), ToolInfo {
-            server_name: server_name.to_string(),
-            host_tool_name: spec.name.clone(),
-        });
+        tn_map.insert(
+            model_tool_name.clone(),
+            ToolInfo {
+                server_name: server_name.to_string(),
+                host_tool_name: spec.name.clone(),
+            },
+        );
         spec.name = model_tool_name;
         spec.tool_origin = ToolOrigin::McpServer(server_name.to_string());
         number_of_tools += 1;
@@ -1768,8 +1933,8 @@ mod tests {
 
     #[test]
     fn test_sampling_approval_dialog_formatting() {
-        use crate::mcp_client::{SamplingRequest, McpSamplingMessage, McpSamplingContent};
-        
+        use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, SamplingRequest};
+
         // Test single message formatting
         let request = SamplingRequest {
             server_name: "test-server".to_string(),
