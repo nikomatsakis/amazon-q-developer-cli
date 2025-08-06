@@ -311,6 +311,35 @@ impl Agent {
         agent.thaw(agent_path.as_ref(), global_mcp_config.as_ref())?;
         Ok(agent)
     }
+
+    /// Check if sampling is trusted for the given MCP server
+    pub fn is_server_trusted_for_sampling(&self, server_name: &str) -> bool {
+        use crate::util::MCP_SERVER_TOOL_DELIMITER;
+        let sampling_tool_name = format!("@{}{}<sampling>", server_name, MCP_SERVER_TOOL_DELIMITER);
+        self.allowed_tools.contains(&sampling_tool_name)
+    }
+
+    /// Trust sampling requests from the given MCP server
+    pub fn trust_server_for_sampling(&mut self, server_name: &str) {
+        use crate::util::MCP_SERVER_TOOL_DELIMITER;
+        let sampling_tool_name = format!("@{}{}<sampling>", server_name, MCP_SERVER_TOOL_DELIMITER);
+        self.allowed_tools.insert(sampling_tool_name);
+    }
+
+    /// Trust an MCP tool and automatically trust sampling from that server
+    pub fn trust_mcp_tool(&mut self, tool_name: &str) {
+        use crate::util::MCP_SERVER_TOOL_DELIMITER;
+        
+        // Add the specific tool to allowed_tools
+        self.allowed_tools.insert(tool_name.to_string());
+        
+        // If this is an MCP tool (starts with @), also trust sampling from that server
+        if tool_name.starts_with('@') {
+            if let Some((server_name, _)) = tool_name[1..].split_once(MCP_SERVER_TOOL_DELIMITER) {
+                self.trust_server_for_sampling(server_name);
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -335,7 +364,9 @@ impl Agents {
     /// - custom tool namespacing
     pub fn trust_tools(&mut self, tool_names: Vec<String>) {
         if let Some(agent) = self.get_active_mut() {
-            agent.allowed_tools.extend(tool_names);
+            for tool_name in tool_names {
+                agent.trust_mcp_tool(&tool_name);
+            }
         }
     }
 
@@ -907,5 +938,64 @@ mod tests {
         assert!(validate_agent_name("_invalid").is_err());
         assert!(validate_agent_name("invalid!").is_err());
         assert!(validate_agent_name("invalid space").is_err());
+    }
+
+    #[test]
+    fn test_sampling_trust_inheritance() {
+        let mut agent = Agent::default();
+        
+        // Trust an MCP tool - should automatically trust sampling from that server
+        agent.trust_mcp_tool("@file-watcher/analyze_code");
+        
+        // Should trust sampling from that server
+        assert!(agent.is_server_trusted_for_sampling("file-watcher"));
+        assert!(agent.allowed_tools.contains("@file-watcher/<sampling>"));
+        
+        // Should also have the original tool
+        assert!(agent.allowed_tools.contains("@file-watcher/analyze_code"));
+    }
+
+    #[test]
+    fn test_sampling_only_trust() {
+        let mut agent = Agent::default();
+        
+        // Trust only sampling, not tools
+        agent.trust_server_for_sampling("docs-helper");
+        
+        // Should trust sampling but not have any specific tools
+        assert!(agent.is_server_trusted_for_sampling("docs-helper"));
+        assert!(agent.allowed_tools.contains("@docs-helper/<sampling>"));
+        assert!(!agent.allowed_tools.contains("@docs-helper/update_readme"));
+    }
+
+    #[test]
+    fn test_non_mcp_tool_trust() {
+        let mut agent = Agent::default();
+        
+        // Trust a non-MCP tool (no @ prefix)
+        agent.trust_mcp_tool("fs_read");
+        
+        // Should have the tool but no sampling trust
+        assert!(agent.allowed_tools.contains("fs_read"));
+        assert!(!agent.is_server_trusted_for_sampling("fs_read"));
+    }
+
+    #[test]
+    fn test_agents_trust_tools_inheritance() {
+        let mut agents = Agents::default();
+        let agent = Agent::default();
+        agents.agents.insert("test".to_string(), agent);
+        agents.active_idx = "test".to_string();
+        
+        // Trust tools via Agents interface
+        agents.trust_tools(vec!["@server1/tool1".to_string(), "@server2/tool2".to_string()]);
+        
+        let active_agent = agents.get_active().unwrap();
+        
+        // Should trust both tools and their servers for sampling
+        assert!(active_agent.allowed_tools.contains("@server1/tool1"));
+        assert!(active_agent.allowed_tools.contains("@server2/tool2"));
+        assert!(active_agent.is_server_trusted_for_sampling("server1"));
+        assert!(active_agent.is_server_trusted_for_sampling("server2"));
     }
 }
