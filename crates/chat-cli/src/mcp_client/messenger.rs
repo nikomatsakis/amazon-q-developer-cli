@@ -5,6 +5,7 @@ use super::{
     ResourceTemplatesListResult,
     ResourcesListResult,
     ToolsListResult,
+    SamplingRequest,
 };
 
 /// An interface that abstracts the implementation for information delivery from client and its
@@ -36,6 +37,10 @@ pub trait Messenger: std::fmt::Debug + Send + Sync + 'static {
 
     /// Signals to the orchestrator that a server has started initializing
     async fn send_init_msg(&self) -> Result<(), MessengerError>;
+
+    /// Sends a sampling request from an MCP server to the UI for user approval
+    /// This function is used to deliver sampling requests that need user approval
+    async fn send_sampling_request(&self, request: SamplingRequest) -> Result<(), MessengerError>;
 
     /// Creates a duplicate of the messenger object
     /// This function is used to create a new instance of the messenger with the same configuration
@@ -76,6 +81,10 @@ impl Messenger for NullMessenger {
     }
 
     async fn send_init_msg(&self) -> Result<(), MessengerError> {
+        Ok(())
+    }
+
+    async fn send_sampling_request(&self, _request: SamplingRequest) -> Result<(), MessengerError> {
         Ok(())
     }
 
