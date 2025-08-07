@@ -416,21 +416,23 @@ where
                                                         match response_rx.await {
                                                             Ok(crate::mcp_client::SamplingResponse::Approved { llm_response, .. }) => {
                                                                 // Send success response back to MCP server
+                                                                // FIXME: Model name should be dynamic based on actual model used
+                                                                // FIXME: Should populate stop_reason and meta fields appropriately
                                                                 let result = crate::mcp_client::McpSamplingCreateMessageResult {
                                                                     role: "assistant".to_string(),
                                                                     content: crate::mcp_client::McpSamplingContent {
                                                                         content_type: "text".to_string(),
                                                                         text: llm_response,
                                                                     },
-                                                                    model: "amazon-q".to_string(),
-                                                                    stop_reason: None,
-                                                                    meta: None,
+                                                                    model: "amazon-q".to_string(), // FIXME: Use actual model ID
+                                                                    stop_reason: None, // FIXME: Extract from LLM response metadata
+                                                                    meta: None, // FIXME: Include token usage and other metadata
                                                                 };
                                                                 
                                                                 let response = JsonRpcResponseMessage {
                                                                     jsonrpc: JsonRpcVersion::default(),
                                                                     id: id,
-                                                                    result: Some(serde_json::to_value(result).unwrap()),
+                                                                    result: Some(serde_json::to_value(result).unwrap()), // FIXME: Handle serialization errors
                                                                     error: None,
                                                                 };
                                                                 
@@ -444,9 +446,10 @@ where
                                                             },
                                                             Ok(crate::mcp_client::SamplingResponse::Rejected { reason, .. }) => {
                                                                 // Send error response back to MCP server
+                                                                // FIXME: Use more specific error codes based on rejection reason
                                                                 if let Err(response_err) = client_ref.send_error_response(
                                                                     id.to_string(),
-                                                                    ErrorCode::InvalidRequest,
+                                                                    ErrorCode::InvalidRequest, // FIXME: Should be more specific error code
                                                                     format!("Sampling request rejected: {}", reason),
                                                                 ).await {
                                                                     tracing::error!(
