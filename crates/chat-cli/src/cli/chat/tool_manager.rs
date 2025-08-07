@@ -1594,7 +1594,7 @@ fn queue_incomplete_load_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, SamplingRequest};
+    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, Role, SamplingRequest};
 
     #[test]
     fn test_sanitize_server_name() {
@@ -1625,7 +1625,7 @@ mod tests {
             server_name: "test-server".to_string(),
             request_id: "req-123".to_string(),
             messages: vec![McpSamplingMessage {
-                role: "user".to_string(),
+                role: Role::User,
                 content: McpSamplingContent {
                     content_type: "text".to_string(),
                     text: "What is the capital of France?".to_string(),
@@ -1672,7 +1672,7 @@ user: What is the capital of France?
         assert_eq!(result.system_prompt, Some("Be helpful".to_string()));
         assert_eq!(result.max_tokens, Some(1000));
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].role, Role::User);
         assert_eq!(result.messages[0].content.text, "What is the capital of France?");
         assert_eq!(result.messages[0].content.content_type, "text");
     }
@@ -1706,13 +1706,13 @@ user: What about Germany?
         
         assert_eq!(result.messages.len(), 3);
         
-        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].role, Role::User);
         assert_eq!(result.messages[0].content.text, "What is the capital of France?");
         
-        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].role, Role::Assistant);
         assert_eq!(result.messages[1].content.text, "The capital of France is Paris.");
         
-        assert_eq!(result.messages[2].role, "user");
+        assert_eq!(result.messages[2].role, Role::User);
         assert_eq!(result.messages[2].content.text, "What about Germany?");
     }
 
@@ -1737,9 +1737,9 @@ System: This is a system message
         let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
         
         assert_eq!(result.messages.len(), 3);
-        assert_eq!(result.messages[0].role, "user");
-        assert_eq!(result.messages[1].role, "assistant");
-        assert_eq!(result.messages[2].role, "system");
+        assert_eq!(result.messages[0].role, Role::User);
+        assert_eq!(result.messages[1].role, Role::Assistant);
+        assert_eq!(result.messages[2].role, Role::User); // system converted to user
     }
 
     #[test]
@@ -1812,7 +1812,7 @@ user: This is the actual message
         let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
         
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].role, Role::User);
         assert_eq!(result.messages[0].content.text, "This is the actual message");
     }
 
@@ -1841,9 +1841,9 @@ user: This is the actual message
         let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
         
         assert_eq!(result.messages.len(), 2);
-        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].role, Role::User);
         assert_eq!(result.messages[0].content.text, "This message has extra whitespace");
-        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].role, Role::Assistant);
         assert_eq!(result.messages[1].content.text, "This response also has whitespace");
     }
 
@@ -1868,9 +1868,9 @@ assistant: This should also be parsed
         let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
         
         assert_eq!(result.messages.len(), 2);
-        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].role, Role::User);
         assert_eq!(result.messages[0].content.text, "This should be parsed");
-        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].role, Role::Assistant);
         assert_eq!(result.messages[1].content.text, "This should also be parsed");
     }
 
@@ -1936,9 +1936,9 @@ assistant: This has content
         
         // Should still parse the empty user message and the assistant message
         assert_eq!(result.messages.len(), 2);
-        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].role, Role::User);
         assert_eq!(result.messages[0].content.text, "");
-        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].role, Role::Assistant);
         assert_eq!(result.messages[1].content.text, "This has content");
     }
 
@@ -1950,14 +1950,14 @@ assistant: This has content
             request_id: "req-format".to_string(),
             messages: vec![
                 McpSamplingMessage {
-                    role: "user".to_string(),
+                    role: Role::User,
                     content: McpSamplingContent {
                         content_type: "text".to_string(),
                         text: "What is the capital of France?".to_string(),
                     },
                 },
                 McpSamplingMessage {
-                    role: "assistant".to_string(),
+                    role: Role::Assistant,
                     content: McpSamplingContent {
                         content_type: "text".to_string(),
                         text: "The capital of France is Paris.".to_string(),

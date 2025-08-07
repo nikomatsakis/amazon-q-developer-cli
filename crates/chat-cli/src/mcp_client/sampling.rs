@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::facilitator_types::Role;
+
 // Message types for MCP sampling communication between actors.
 //
 // *Convention:* the `Mcp` prefix indicates the type corresponds to the transport
@@ -42,7 +44,7 @@ pub struct SamplingRequest {
 /// Reference: [MCP specification](https://github.com/modelcontextprotocol/specification/blob/main/docs/specification/2025-06-18/schema.mdx#samplingmessage)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpSamplingMessage {
-    pub role: String,                // NDM-FIXME: use existing Role
+    pub role: Role,                  // Now uses existing Role enum
     pub content: McpSamplingContent, // NDM-FIXME: use existing MessageContent
 }
 
@@ -271,7 +273,7 @@ mod tests {
         assert_eq!(request.server_name, "test-server");
         assert_eq!(request.request_id, "req-123");
         assert_eq!(request.messages.len(), 1);
-        assert_eq!(request.messages[0].role, "user");
+        assert_eq!(request.messages[0].role, Role::User);
         assert_eq!(request.messages[0].content.text, "What is the capital of France?");
         assert_eq!(request.system_prompt, Some("You are a helpful assistant.".to_string()));
         assert_eq!(request.max_tokens, Some(100));

@@ -111,10 +111,9 @@ fn sampling_messages_to_prompt(msgs: &[McpSamplingMessage]) -> Result<VecDeque<P
     // First pass, create pairs of roles and strings
     let mut pairs: Vec<(Role, String)> = Vec::new();
     for msg in msgs {
-        let role = match msg.role.as_str() {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            msg_role => return Err(format!("unknown role `{msg_role}`, expected `user` or `assistant`")),
+        let role = match msg.role {
+            Role::User => Role::User,
+            Role::Assistant => Role::Assistant,
         };
 
         // Append consecutive messages as paragraphs.
@@ -361,7 +360,7 @@ pub fn parse_edited_sampling_content(
     use crate::mcp_client::{McpSamplingContent, McpSamplingMessage};
 
     let mut messages = Vec::new();
-    let mut current_role = String::new();
+    let mut current_role: Option<Role> = None;
     let mut current_content = String::new();
     let mut in_message = false;
 
@@ -376,15 +375,15 @@ pub fn parse_edited_sampling_content(
         // Check for separator
         if line == "---" {
             // Finish current message if we have one
-            if in_message && !current_role.is_empty() {
+            if in_message && current_role.is_some() {
                 messages.push(McpSamplingMessage {
-                    role: current_role.clone(),
+                    role: current_role.unwrap(),
                     content: McpSamplingContent {
                         content_type: "text".to_string(),
                         text: current_content.trim().to_string(),
                     },
                 });
-                current_role.clear();
+                current_role = None;
                 current_content.clear();
                 in_message = false;
             }
@@ -393,12 +392,23 @@ pub fn parse_edited_sampling_content(
 
         // Check for role: content pattern
         if let Some(colon_pos) = line.find(':') {
-            let potential_role = line[..colon_pos].trim().to_lowercase();
-            if matches!(potential_role.as_str(), "user" | "assistant" | "system") {
+            let potential_role_str = line[..colon_pos].trim().to_lowercase();
+            let potential_role = match potential_role_str.as_str() {
+                "user" => Some(Role::User),
+                "assistant" => Some(Role::Assistant),
+                "system" => {
+                    // Note: MCP spec allows system role, but we only support user/assistant
+                    // Convert system to user for compatibility
+                    Some(Role::User)
+                },
+                _ => None,
+            };
+
+            if let Some(role) = potential_role {
                 // Finish previous message if we have one
-                if in_message && !current_role.is_empty() {
+                if in_message && current_role.is_some() {
                     messages.push(McpSamplingMessage {
-                        role: current_role.clone(),
+                        role: current_role.unwrap(),
                         content: McpSamplingContent {
                             content_type: "text".to_string(),
                             text: current_content.trim().to_string(),
@@ -407,7 +417,7 @@ pub fn parse_edited_sampling_content(
                 }
 
                 // Start new message
-                current_role = potential_role;
+                current_role = Some(role);
                 current_content = line[colon_pos + 1..].trim().to_string();
                 in_message = true;
                 continue;
@@ -424,9 +434,9 @@ pub fn parse_edited_sampling_content(
     }
 
     // Finish the last message
-    if in_message && !current_role.is_empty() {
+    if in_message && current_role.is_some() {
         messages.push(McpSamplingMessage {
-            role: current_role,
+            role: current_role.unwrap(),
             content: McpSamplingContent {
                 content_type: "text".to_string(),
                 text: current_content.trim().to_string(),
@@ -469,7 +479,7 @@ mod tests {
     // Helper function to create a user message for testing
     fn create_user_message(text: &str) -> McpSamplingMessage {
         McpSamplingMessage {
-            role: "user".to_string(),
+            role: Role::User,
             content: McpSamplingContent {
                 content_type: "text".to_string(),
                 text: text.to_string(),
@@ -480,7 +490,7 @@ mod tests {
     // Helper function to create an assistant message for testing
     fn create_assistant_message(text: &str) -> McpSamplingMessage {
         McpSamplingMessage {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: McpSamplingContent {
                 content_type: "text".to_string(),
                 text: text.to_string(),
@@ -628,21 +638,24 @@ mod tests {
 
     #[test]
     fn test_unknown_role_errors() {
-        let messages = vec![McpSamplingMessage {
-            role: "unknown_role".to_string(),
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
-                text: "This has an unknown role.".to_string(),
-            },
-        }];
-
-        sampling_messages_to_prompt(&messages).unwrap_err();
+        // Since we now use Role enum, we can't create messages with unknown roles
+        // This test now verifies that only User and Assistant roles are supported
+        let user_msg = create_user_message("User message");
+        let assistant_msg = create_assistant_message("Assistant message");
+        
+        assert!(matches!(user_msg.role, Role::User));
+        assert!(matches!(assistant_msg.role, Role::Assistant));
+        
+        // Test that sampling_messages_to_prompt works with valid roles
+        let messages = vec![user_msg];
+        let result = sampling_messages_to_prompt(&messages);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn test_no_user_errors() {
         let messages = vec![McpSamplingMessage {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: McpSamplingContent {
                 content_type: "text".to_string(),
                 text: "You are a helpful assistant.".to_string(),
