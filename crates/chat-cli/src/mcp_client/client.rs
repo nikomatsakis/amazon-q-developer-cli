@@ -386,12 +386,92 @@ where
                                                 params,
                                             ) {
                                                 Ok(sampling_request) => {
-                                                    if let Err(e) = messenger.send_sampling_request(sampling_request).await {
+                                                    // Create one-shot channel for bidirectional communication:
+                                                    // - response_tx goes to UI Actor for sending back approval decision
+                                                    // - response_rx stays here to wait for the user's response
+                                                    // This enables: MCP Server → MCP Client → UI Actor → MCP Client → MCP Server
+                                                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                                                    
+                                                    // Send request with response channel
+                                                    if let Err(e) = messenger.send_sampling_request(sampling_request, response_tx).await {
                                                         tracing::error!(
                                                             "Failed to send sampling request from {}: {:?}",
                                                             server_name,
                                                             e
                                                         );
+                                                        // Send error response back to MCP server
+                                                        if let Err(response_err) = client_ref.send_error_response(
+                                                            id.to_string(),
+                                                            ErrorCode::InternalError,
+                                                            "Failed to send sampling request to UI".to_string(),
+                                                        ).await {
+                                                            tracing::error!(
+                                                                "Failed to send error response to {}: {:?}",
+                                                                server_name,
+                                                                response_err
+                                                            );
+                                                        }
+                                                    } else {
+                                                        // Wait for response from UI Actor
+                                                        match response_rx.await {
+                                                            Ok(crate::mcp_client::SamplingResponse::Approved { llm_response, .. }) => {
+                                                                // Send success response back to MCP server
+                                                                let result = crate::mcp_client::McpSamplingCreateMessageResult {
+                                                                    role: "assistant".to_string(),
+                                                                    content: crate::mcp_client::McpSamplingContent {
+                                                                        content_type: "text".to_string(),
+                                                                        text: llm_response,
+                                                                    },
+                                                                    model: "amazon-q".to_string(),
+                                                                    stop_reason: None,
+                                                                    meta: None,
+                                                                };
+                                                                
+                                                                let response = JsonRpcResponseMessage {
+                                                                    jsonrpc: JsonRpcVersion::default(),
+                                                                    id: id,
+                                                                    result: Some(serde_json::to_value(result).unwrap()),
+                                                                    error: None,
+                                                                };
+                                                                
+                                                                if let Err(send_err) = client_ref.send_response(response).await {
+                                                                    tracing::error!(
+                                                                        "Failed to send success response to {}: {:?}",
+                                                                        server_name,
+                                                                        send_err
+                                                                    );
+                                                                }
+                                                            },
+                                                            Ok(crate::mcp_client::SamplingResponse::Rejected { reason, .. }) => {
+                                                                // Send error response back to MCP server
+                                                                if let Err(response_err) = client_ref.send_error_response(
+                                                                    id.to_string(),
+                                                                    ErrorCode::InvalidRequest,
+                                                                    format!("Sampling request rejected: {}", reason),
+                                                                ).await {
+                                                                    tracing::error!(
+                                                                        "Failed to send rejection response to {}: {:?}",
+                                                                        server_name,
+                                                                        response_err
+                                                                    );
+                                                                }
+                                                            },
+                                                            Err(_) => {
+                                                                // Channel was dropped - UI Actor crashed or request was cancelled
+                                                                tracing::error!("Sampling response channel was dropped for server '{}'", server_name);
+                                                                if let Err(response_err) = client_ref.send_error_response(
+                                                                    id.to_string(),
+                                                                    ErrorCode::InternalError,
+                                                                    "Internal error processing sampling request".to_string(),
+                                                                ).await {
+                                                                    tracing::error!(
+                                                                        "Failed to send error response to {}: {:?}",
+                                                                        server_name,
+                                                                        response_err
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 },
                                                 Err(e) => {
@@ -652,6 +732,22 @@ where
                 .await
                 .map_err(send_map_err)??,
         )
+    }
+
+    /// Sends a JSON-RPC success response back to the server
+    /// Used when we need to respond to a server request with a result
+    async fn send_response(
+        &self,
+        response: JsonRpcResponseMessage,
+    ) -> Result<(), ClientError> {
+        let msg = JsonRpcMessage::Response(response);
+        let send_map_err = |e: Elapsed| (e, "success_response".to_string());
+        
+        time::timeout(Duration::from_millis(self.timeout), self.transport.send(&msg))
+            .await
+            .map_err(send_map_err)??;
+            
+        Ok(())
     }
 
     /// Sends a JSON-RPC error response back to the server
