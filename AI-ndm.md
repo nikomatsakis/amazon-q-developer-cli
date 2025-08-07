@@ -4,6 +4,8 @@ Track progress in github tracking issues on nikomatsakis/amazon-q-developer-cli 
 
 /Users/nikomat/dev/socratic-shell/src/prompts/project/github-tracking-issues.md
 
+Use the `gh` tool to post comments and things. Use --body-file with a heredoc for complex markdown content to avoid escaping complications.
+
 # Checkpointing
 
 When asked to checkpoint:

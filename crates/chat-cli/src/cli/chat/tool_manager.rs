@@ -321,6 +321,7 @@ impl ToolManagerBuilder {
         let agent = Arc::new(Mutex::new(self.agent.unwrap_or_default()));
         let agent_clone = agent.clone();
         let database = os.database.clone();
+        let os_clone = os.clone(); // Clone os for use in sampling requests
 
         tokio::spawn(async move {
             let mut record_temp_buf = Vec::<u8>::new();
@@ -544,7 +545,7 @@ impl ToolManagerBuilder {
                     },
                     UpdateEventMessage::SamplingRequest { request, response_tx } => {
                         // Handle sampling request using the dedicated sampling module
-                        let response = sampling::handle_sampling_request(&request, &agent_clone).await;
+                        let response = sampling::handle_sampling_request(&request, &agent_clone, &os_clone).await;
 
                         // Send response back through the one-shot channel to complete the request-response cycle.
                         // This delivers the user's approval decision back to the MCP client, which will then
@@ -1319,212 +1320,6 @@ impl ToolManager {
     }
 }
 
-/// Show user approval dialog for sampling requests
-///
-/// Displays a dialog asking the user whether to approve, reject, trust, or edit
-/// sampling requests from the given MCP server. The edit option allows users to
-/// modify the request content and then returns to the approval dialog.
-fn show_sampling_approval_dialog(
-    request: &crate::mcp_client::SamplingRequest,
-) -> eyre::Result<crate::mcp_client::SamplingApproval> {
-    use crate::mcp_client::SamplingApproval;
-    use crate::util::choose;
-
-    let mut current_request = request.clone();
-    
-    loop {
-        // Format the current sampling request for display
-        let messages_preview = if current_request.messages.len() == 1 {
-            let msg = &current_request.messages[0];
-            let preview = if msg.content.text.len() > 100 {
-                format!("{}...", &msg.content.text[..97])
-            } else {
-                msg.content.text.clone()
-            };
-            format!("> {}: {}", msg.role, preview)
-        } else {
-            format!("{} messages", current_request.messages.len())
-        };
-
-        let prompt = format!(
-            "MCP server '{}' wants to use Amazon Q:\n{}\n\nHow would you like to respond?",
-            current_request.server_name, messages_preview
-        );
-
-        let options = vec![
-            "Approve once",
-            "Edit in editor",
-            "Reject",
-            "Trust this server (approve all future sampling)",
-        ];
-
-        match choose(&prompt, &options)? {
-            Some(0) => {
-                // Return the current request (which may or may not have been edited)
-                return Ok(SamplingApproval::Approve(current_request));
-            },
-            Some(1) => {
-                // Open editor with the current sampling request content
-                match open_editor_for_sampling(&current_request) {
-                    Ok(edited_request) => {
-                        current_request = edited_request;
-                        // Continue the loop to show the dialog again with edited content
-                        continue;
-                    },
-                    Err(e) => {
-                        tracing::error!("Failed to open editor for sampling request: {}", e);
-                        // Continue the loop to let user try again or choose different option
-                        continue;
-                    }
-                }
-            },
-            Some(2) => return Ok(SamplingApproval::Reject),
-            Some(3) => return Ok(SamplingApproval::TrustServer),
-            Some(_) => unreachable!("Invalid selection index"),
-            None => {
-                // User cancelled (Ctrl+C)
-                tracing::info!("User cancelled sampling approval dialog");
-                return Ok(SamplingApproval::Reject);
-            },
-        }
-    }
-}
-
-/// Open editor for sampling request editing
-///
-/// Formats the sampling request as human-readable text, opens it in the user's
-/// preferred editor, and parses the result back into a SamplingRequest.
-fn open_editor_for_sampling(
-    request: &crate::mcp_client::SamplingRequest,
-) -> eyre::Result<crate::mcp_client::SamplingRequest> {
-    // Format the sampling request as editable text
-    let formatted_content = format_sampling_request_for_editor(request);
-    
-    // Use the existing editor functionality
-    match crate::cli::chat::cli::editor::open_editor(Some(formatted_content)) {
-        Ok(edited_content) => {
-            // Parse the edited content back into a SamplingRequest
-            parse_edited_sampling_content(&edited_content, request)
-        },
-        Err(e) => Err(eyre::eyre!("Editor failed: {}", e)),
-    }
-}
-
-/// Format sampling request for editor display
-fn format_sampling_request_for_editor(request: &crate::mcp_client::SamplingRequest) -> String {
-    let mut content = String::new();
-    content.push_str(&format!("# MCP Sampling Request from '{}'\n", request.server_name));
-    content.push_str("# Edit the messages below. Lines starting with # are comments and will be ignored.\n");
-    content.push_str("# Format: ROLE: message content\n");
-    content.push_str("# Available roles: user, assistant, system\n\n");
-    
-    for (i, message) in request.messages.iter().enumerate() {
-        if i > 0 {
-            content.push_str("\n---\n\n");
-        }
-        content.push_str(&format!("{}: {}\n", message.role, message.content.text));
-    }
-    
-    content
-}
-
-/// Parse edited sampling content back into a SamplingRequest
-fn parse_edited_sampling_content(
-    content: &str,
-    original_request: &crate::mcp_client::SamplingRequest,
-) -> eyre::Result<crate::mcp_client::SamplingRequest> {
-    use crate::mcp_client::{McpSamplingMessage, McpSamplingContent};
-    
-    let mut messages = Vec::new();
-    let mut current_role = String::new();
-    let mut current_content = String::new();
-    let mut in_message = false;
-    
-    for line in content.lines() {
-        let line = line.trim();
-        
-        // Skip comments and empty lines
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        
-        // Check for separator
-        if line == "---" {
-            // Finish current message if we have one
-            if in_message && !current_role.is_empty() {
-                messages.push(McpSamplingMessage {
-                    role: current_role.clone(),
-                    content: McpSamplingContent {
-                        content_type: "text".to_string(),
-                        text: current_content.trim().to_string(),
-                    },
-                });
-                current_role.clear();
-                current_content.clear();
-                in_message = false;
-            }
-            continue;
-        }
-        
-        // Check for role: content pattern
-        if let Some(colon_pos) = line.find(':') {
-            let potential_role = line[..colon_pos].trim().to_lowercase();
-            if matches!(potential_role.as_str(), "user" | "assistant" | "system") {
-                // Finish previous message if we have one
-                if in_message && !current_role.is_empty() {
-                    messages.push(McpSamplingMessage {
-                        role: current_role.clone(),
-                        content: McpSamplingContent {
-                            content_type: "text".to_string(),
-                            text: current_content.trim().to_string(),
-                        },
-                    });
-                }
-                
-                // Start new message
-                current_role = potential_role;
-                current_content = line[colon_pos + 1..].trim().to_string();
-                in_message = true;
-                continue;
-            }
-        }
-        
-        // If we're in a message, append to content
-        if in_message {
-            if !current_content.is_empty() {
-                current_content.push('\n');
-            }
-            current_content.push_str(line);
-        }
-    }
-    
-    // Finish the last message
-    if in_message && !current_role.is_empty() {
-        messages.push(McpSamplingMessage {
-            role: current_role,
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
-                text: current_content.trim().to_string(),
-            },
-        });
-    }
-    
-    // If no messages were parsed, return an error
-    if messages.is_empty() {
-        return Err(eyre::eyre!("No valid messages found in edited content"));
-    }
-    
-    // Create new request with edited messages
-    Ok(crate::mcp_client::SamplingRequest {
-        server_name: original_request.server_name.clone(),
-        request_id: original_request.request_id.clone(),
-        messages,
-        model_preferences: original_request.model_preferences.clone(),
-        system_prompt: original_request.system_prompt.clone(),
-        max_tokens: original_request.max_tokens,
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn process_tool_specs(
     database: &Database,
@@ -1847,6 +1642,9 @@ mod tests {
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].content.text, "What is the capital of France?");
     }
+
+    // Import sampling functions for tests
+    use super::sampling::{parse_edited_sampling_content, format_sampling_request_for_editor};
 
     #[test]
     fn test_parse_edited_sampling_content_single_message() {

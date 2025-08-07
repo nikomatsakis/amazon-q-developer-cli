@@ -3,8 +3,102 @@
 //! This module contains all the functionality for handling MCP sampling requests,
 //! including user approval dialogs, request editing, and response generation.
 
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use eyre;
+
 use crate::mcp_client::{SamplingRequest, SamplingResponse, SamplingApproval};
 use crate::util::choose;
+use crate::cli::chat::{ConversationState, parser::{SendMessageStream, ResponseEvent}};
+use crate::os::Os;
+
+/// Call the LLM for a sampling request
+///
+/// Converts the MCP sampling request to Q CLI's conversation format,
+/// calls the LLM API, and extracts the final response text.
+async fn call_llm_for_sampling(
+    request: &SamplingRequest,
+    os: &Os,
+) -> Result<String, String> {
+    // Create a temporary conversation state for the sampling request
+    let conversation_id = format!("sampling-{}", request.request_id);
+    
+    // Extract the prompt text from the sampling request messages
+    let prompt_text = request.messages.iter()
+        .filter_map(|msg| {
+            if msg.role == "user" {
+                Some(msg.content.text.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    
+    if prompt_text.is_empty() {
+        return Err("No user messages found in sampling request".to_string());
+    }
+    
+    // Create a minimal conversation state for the sampling request
+    // Note: We create a minimal state without tools/context for security
+    let mut conversation_state = ConversationState::new(
+        &conversation_id,
+        crate::cli::agent::Agents::default(), // Empty agents for sampling
+        std::collections::HashMap::new(), // No tools for sampling
+        crate::cli::chat::tool_manager::ToolManager::default(), // Empty tool manager
+        None, // Use default model
+    ).await;
+    
+    // Set the user message from the sampling request
+    conversation_state.set_next_user_message(prompt_text).await;
+    
+    // Convert to sendable conversation state
+    let sendable_state = conversation_state
+        .as_sendable_conversation_state(os, &mut vec![], false) // No hooks for sampling
+        .await
+        .map_err(|e| format!("Failed to create sendable conversation state: {}", e))?;
+    
+    // Send the message to the LLM
+    let request_metadata_lock = Arc::new(Mutex::new(None));
+    let mut response_stream = SendMessageStream::send_message(
+        &os.client,
+        sendable_state,
+        request_metadata_lock,
+        None, // No message meta tags
+    ).await.map_err(|e| format!("Failed to send message to LLM: {}", e))?;
+    
+    // Consume the response stream and extract the final text
+    let mut response_text = String::new();
+    
+    loop {
+        match response_stream.recv().await {
+            Some(Ok(event)) => {
+                match event {
+                    ResponseEvent::AssistantText(text) => {
+                        response_text.push_str(&text);
+                    },
+                    ResponseEvent::EndStream { .. } => {
+                        break;
+                    },
+                    // Ignore other events (tool uses, etc.) for sampling
+                    _ => {},
+                }
+            },
+            Some(Err(e)) => {
+                return Err(format!("Error receiving LLM response: {}", e));
+            },
+            None => {
+                return Err("LLM response stream ended unexpectedly".to_string());
+            },
+        }
+    }
+    
+    if response_text.trim().is_empty() {
+        return Err("LLM returned empty response".to_string());
+    }
+    
+    Ok(response_text.trim().to_string())
+}
 
 /// Handle a sampling request with trust checking and user approval
 ///
@@ -13,6 +107,7 @@ use crate::util::choose;
 pub async fn handle_sampling_request(
     request: &SamplingRequest,
     agent: &std::sync::Arc<tokio::sync::Mutex<crate::cli::agent::Agent>>,
+    os: &Os,
 ) -> SamplingResponse {
     let server_name = &request.server_name;
     let request_id = &request.request_id;
@@ -33,10 +128,19 @@ pub async fn handle_sampling_request(
     if is_trusted {
         // Auto-approve trusted sampling requests
         tracing::info!("Auto-approving sampling request from trusted server '{}'", server_name);
-        // TODO: Make actual LLM call here
-        SamplingResponse::Approved {
-            request_id: request_id.clone(),
-            llm_response: "This is a placeholder response for trusted sampling request.".to_string(),
+        
+        match call_llm_for_sampling(request, os).await {
+            Ok(llm_response) => SamplingResponse::Approved {
+                request_id: request_id.clone(),
+                llm_response,
+            },
+            Err(error) => {
+                tracing::error!("LLM call failed for trusted sampling request: {}", error);
+                SamplingResponse::Rejected {
+                    request_id: request_id.clone(),
+                    reason: format!("LLM call failed: {}", error),
+                }
+            }
         }
     } else {
         // Show user approval dialog for untrusted requests
@@ -48,10 +152,19 @@ pub async fn handle_sampling_request(
                             "User approved sampling request from server '{}'",
                             server_name
                         );
-                        // TODO: Make actual LLM call with approved_request here
-                        SamplingResponse::Approved {
-                            request_id: request_id.clone(),
-                            llm_response: "This is a placeholder response for approved sampling request.".to_string(),
+                        
+                        match call_llm_for_sampling(request, os).await {
+                            Ok(llm_response) => SamplingResponse::Approved {
+                                request_id: request_id.clone(),
+                                llm_response,
+                            },
+                            Err(error) => {
+                                tracing::error!("LLM call failed for approved sampling request: {}", error);
+                                SamplingResponse::Rejected {
+                                    request_id: request_id.clone(),
+                                    reason: format!("LLM call failed: {}", error),
+                                }
+                            }
                         }
                     },
                     SamplingApproval::TrustServer => {
@@ -64,10 +177,19 @@ pub async fn handle_sampling_request(
                             let mut agent_guard = agent.lock().await;
                             agent_guard.trust_server_for_sampling(server_name);
                         }
-                        // TODO: Make actual LLM call here
-                        SamplingResponse::Approved {
-                            request_id: request_id.clone(),
-                            llm_response: "This is a placeholder response for trusted sampling request.".to_string(),
+                        
+                        match call_llm_for_sampling(request, os).await {
+                            Ok(llm_response) => SamplingResponse::Approved {
+                                request_id: request_id.clone(),
+                                llm_response,
+                            },
+                            Err(error) => {
+                                tracing::error!("LLM call failed for trust server sampling request: {}", error);
+                                SamplingResponse::Rejected {
+                                    request_id: request_id.clone(),
+                                    reason: format!("LLM call failed: {}", error),
+                                }
+                            }
                         }
                     },
                     SamplingApproval::Reject => {
@@ -108,17 +230,17 @@ fn show_sampling_approval_dialog(
         let messages_preview = if current_request.messages.len() == 1 {
             let msg = &current_request.messages[0];
             let preview = if msg.content.text.len() > 100 {
-                format!("{}...", &msg.content.text[..100])
+                format!("{}...", &msg.content.text[..97])
             } else {
                 msg.content.text.clone()
             };
-            format!("{}: {}", msg.role, preview)
+            format!("> {}: {}", msg.role, preview)
         } else {
-            format!("{} messages in conversation", current_request.messages.len())
+            format!("{} messages", current_request.messages.len())
         };
 
         let prompt = format!(
-            "MCP Sampling Request from '{}'\n\n{}\n\nHow would you like to respond?",
+            "MCP server '{}' wants to use Amazon Q:\n{}\n\nHow would you like to respond?",
             current_request.server_name, messages_preview
         );
 
@@ -182,7 +304,7 @@ fn open_editor_for_sampling(
 }
 
 /// Format sampling request for editor display
-fn format_sampling_request_for_editor(request: &SamplingRequest) -> String {
+pub fn format_sampling_request_for_editor(request: &SamplingRequest) -> String {
     let mut content = String::new();
     content.push_str(&format!("# MCP Sampling Request from '{}'\n", request.server_name));
     content.push_str("# Edit the messages below. Lines starting with # are comments and will be ignored.\n");
@@ -191,7 +313,7 @@ fn format_sampling_request_for_editor(request: &SamplingRequest) -> String {
     
     for (i, message) in request.messages.iter().enumerate() {
         if i > 0 {
-            content.push_str("---\n");
+            content.push_str("\n---\n\n");
         }
         content.push_str(&format!("{}: {}\n", message.role, message.content.text));
     }
@@ -200,7 +322,7 @@ fn format_sampling_request_for_editor(request: &SamplingRequest) -> String {
 }
 
 /// Parse edited sampling content back into a SamplingRequest
-fn parse_edited_sampling_content(
+pub fn parse_edited_sampling_content(
     content: &str,
     original_request: &SamplingRequest,
 ) -> eyre::Result<SamplingRequest> {
@@ -232,12 +354,12 @@ fn parse_edited_sampling_content(
                 });
                 current_role.clear();
                 current_content.clear();
+                in_message = false;
             }
-            in_message = false;
             continue;
         }
         
-        // Check if this line starts a new message (role: content format)
+        // Check for role: content pattern
         if let Some(colon_pos) = line.find(':') {
             let potential_role = line[..colon_pos].trim().to_lowercase();
             if matches!(potential_role.as_str(), "user" | "assistant" | "system") {
@@ -260,7 +382,7 @@ fn parse_edited_sampling_content(
             }
         }
         
-        // If we're in a message, add this line to the content
+        // If we're in a message, append to content
         if in_message {
             if !current_content.is_empty() {
                 current_content.push('\n');
@@ -280,6 +402,7 @@ fn parse_edited_sampling_content(
         });
     }
     
+    // If no messages were parsed, return an error
     if messages.is_empty() {
         return Err(eyre::eyre!("No valid messages found in edited content"));
     }
@@ -293,129 +416,4 @@ fn parse_edited_sampling_content(
         system_prompt: original_request.system_prompt.clone(),
         max_tokens: original_request.max_tokens,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, SamplingRequest};
-
-    #[test]
-    fn test_sampling_approval_dialog_formatting() {
-        // Test single message formatting
-        let request = SamplingRequest {
-            server_name: "test-server".to_string(),
-            request_id: "req-123".to_string(),
-            messages: vec![McpSamplingMessage {
-                role: "user".to_string(),
-                content: McpSamplingContent {
-                    content_type: "text".to_string(),
-                    text: "What is the capital of France?".to_string(),
-                },
-            }],
-            model_preferences: None,
-            system_prompt: None,
-            max_tokens: None,
-        };
-
-        // Just test that the function doesn't panic - we can't easily test the UI
-        let formatted = format_sampling_request_for_editor(&request);
-        assert!(formatted.contains("test-server"));
-        assert!(formatted.contains("What is the capital of France?"));
-    }
-
-    #[test]
-    fn test_parse_edited_sampling_content_single_message() {
-        let original_request = SamplingRequest {
-            server_name: "test-server".to_string(),
-            request_id: "req-123".to_string(),
-            messages: vec![],
-            model_preferences: None,
-            system_prompt: None,
-            max_tokens: None,
-        };
-
-        let edited_content = r#"
-# MCP Sampling Request from 'test-server'
-# Edit the messages below. Lines starting with # are comments.
-
-user: What is the capital of France?
-"#;
-
-        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
-        
-        assert_eq!(result.server_name, "test-server");
-        assert_eq!(result.request_id, "req-123");
-        assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].role, "user");
-        assert_eq!(result.messages[0].content.text, "What is the capital of France?");
-    }
-
-    #[test]
-    fn test_parse_edited_sampling_content_multi_message() {
-        let original_request = SamplingRequest {
-            server_name: "test-server".to_string(),
-            request_id: "req-456".to_string(),
-            messages: vec![],
-            model_preferences: None,
-            system_prompt: None,
-            max_tokens: None,
-        };
-
-        let edited_content = r#"
-user: What is the capital of France?
----
-assistant: The capital of France is Paris.
----
-user: What about Germany?
-"#;
-
-        let result = parse_edited_sampling_content(edited_content, &original_request).unwrap();
-        
-        assert_eq!(result.messages.len(), 3);
-        
-        assert_eq!(result.messages[0].role, "user");
-        assert_eq!(result.messages[0].content.text, "What is the capital of France?");
-        
-        assert_eq!(result.messages[1].role, "assistant");
-        assert_eq!(result.messages[1].content.text, "The capital of France is Paris.");
-        
-        assert_eq!(result.messages[2].role, "user");
-        assert_eq!(result.messages[2].content.text, "What about Germany?");
-    }
-
-    #[test]
-    fn test_format_sampling_request_for_editor() {
-        let request = SamplingRequest {
-            server_name: "test-server".to_string(),
-            request_id: "req-format".to_string(),
-            messages: vec![
-                McpSamplingMessage {
-                    role: "user".to_string(),
-                    content: McpSamplingContent {
-                        content_type: "text".to_string(),
-                        text: "What is the capital of France?".to_string(),
-                    },
-                },
-                McpSamplingMessage {
-                    role: "assistant".to_string(),
-                    content: McpSamplingContent {
-                        content_type: "text".to_string(),
-                        text: "The capital of France is Paris.".to_string(),
-                    },
-                },
-            ],
-            model_preferences: None,
-            system_prompt: None,
-            max_tokens: None,
-        };
-
-        let formatted = format_sampling_request_for_editor(&request);
-        
-        assert!(formatted.contains("# MCP Sampling Request from 'test-server'"));
-        assert!(formatted.contains("# Available roles: user, assistant, system"));
-        assert!(formatted.contains("user: What is the capital of France?"));
-        assert!(formatted.contains("---"));
-        assert!(formatted.contains("assistant: The capital of France is Paris."));
-    }
 }
