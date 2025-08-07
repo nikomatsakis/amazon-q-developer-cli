@@ -23,20 +23,26 @@ async fn call_llm_for_sampling(
     // Create a temporary conversation state for the sampling request
     let conversation_id = format!("sampling-{}", request.request_id);
     
-    // Extract the prompt text from the sampling request messages
-    let prompt_text = request.messages.iter()
-        .filter_map(|msg| {
-            if msg.role == "user" {
-                Some(msg.content.text.clone())
-            } else {
-                None
+    // Convert sampling request messages to MCP Prompt instances
+    let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = request.messages.iter()
+        .map(|msg| {
+            let role = match msg.role.as_str() {
+                "user" => crate::mcp_client::Role::User,
+                "assistant" => crate::mcp_client::Role::Assistant,
+                _ => crate::mcp_client::Role::User, // Default to user for unknown roles
+            };
+            
+            crate::mcp_client::Prompt {
+                role,
+                content: crate::mcp_client::MessageContent::Text {
+                    text: msg.content.text.clone(),
+                },
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect();
     
-    if prompt_text.is_empty() {
-        return Err("No user messages found in sampling request".to_string());
+    if prompts.is_empty() {
+        return Err("No messages found in sampling request".to_string());
     }
     
     // Create a minimal conversation state for the sampling request
@@ -46,11 +52,20 @@ async fn call_llm_for_sampling(
         crate::cli::agent::Agents::default(), // Empty agents for sampling
         std::collections::HashMap::new(), // No tools for sampling
         crate::cli::chat::tool_manager::ToolManager::default(), // Empty tool manager
-        None, // Use default model
+        None, // FIXME: Use model from request.model_preferences when available
     ).await;
     
-    // Set the user message from the sampling request
-    conversation_state.set_next_user_message(prompt_text).await;
+    // Use append_prompts to properly handle the MCP prompt messages
+    // This ensures proper conversation history handling and role management
+    let last_message = conversation_state.append_prompts(prompts);
+    
+    // If append_prompts returned a last message, we need to set it as the next user message
+    // This is required for the conversation state to be properly prepared for LLM processing
+    if let Some(last_msg_content) = last_message {
+        conversation_state.set_next_user_message(last_msg_content).await;
+    } else {
+        return Err("No user message found in sampling request after processing prompts".to_string());
+    }
     
     // Convert to sendable conversation state
     let sendable_state = conversation_state
@@ -122,7 +137,7 @@ pub async fn handle_sampling_request(
     let is_trusted = {
         let agent_guard = agent.lock().await;
         agent_guard.is_server_trusted_for_sampling(server_name)
-        // TODO: Also check trust_all_tools when we have access to the Agents struct
+        // FIXME: Also check trust_all_tools when we have access to the Agents struct
     };
 
     if is_trusted {
