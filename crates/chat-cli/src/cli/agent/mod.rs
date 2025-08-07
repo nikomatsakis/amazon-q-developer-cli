@@ -276,22 +276,10 @@ impl Agent {
         self.allowed_tools.insert(sampling_tool_name);
     }
 
-    /// Trust an MCP tool and automatically trust sampling from that server
+    /// Trust an MCP tool
     pub fn trust_mcp_tool(&mut self, tool_name: &str) {
-        use crate::util::MCP_SERVER_TOOL_DELIMITER;
-
         // Add the specific tool to allowed_tools
         self.allowed_tools.insert(tool_name.to_string());
-
-        // If this is an MCP tool (starts with @), also trust sampling from that server
-        //
-        // NDM-FIXME: Let's revert this behavior -- it'd make more sense to be conservative here
-        // and wait until the user explicitly trusts sampling.
-        if tool_name.starts_with('@') {
-            if let Some((server_name, _)) = tool_name[1..].split_once(MCP_SERVER_TOOL_DELIMITER) {
-                self.trust_server_for_sampling(server_name);
-            }
-        }
     }
 }
 
@@ -936,18 +924,23 @@ mod tests {
     }
 
     #[test]
-    fn test_sampling_trust_inheritance() {
+    fn test_sampling_trust_no_inheritance() {
         let mut agent = Agent::default();
 
-        // Trust an MCP tool - should automatically trust sampling from that server
+        // Trust an MCP tool - should NOT automatically trust sampling from that server
         agent.trust_mcp_tool("@file-watcher/analyze_code");
 
-        // Should trust sampling from that server
+        // Should NOT trust sampling from that server (conservative approach)
+        assert!(!agent.is_server_trusted_for_sampling("file-watcher"));
+        assert!(!agent.allowed_tools.contains("@file-watcher/<sampling>"));
+
+        // Should have the original tool
+        assert!(agent.allowed_tools.contains("@file-watcher/analyze_code"));
+        
+        // But can explicitly trust sampling separately
+        agent.trust_server_for_sampling("file-watcher");
         assert!(agent.is_server_trusted_for_sampling("file-watcher"));
         assert!(agent.allowed_tools.contains("@file-watcher/<sampling>"));
-
-        // Should also have the original tool
-        assert!(agent.allowed_tools.contains("@file-watcher/analyze_code"));
     }
 
     #[test]
@@ -976,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agents_trust_tools_inheritance() {
+    fn test_agents_trust_tools_no_inheritance() {
         let mut agents = Agents::default();
         let agent = Agent::default();
         agents.agents.insert("test".to_string(), agent);
@@ -987,10 +980,10 @@ mod tests {
 
         let active_agent = agents.get_active().unwrap();
 
-        // Should trust both tools and their servers for sampling
+        // Should trust both tools but NOT their servers for sampling (conservative approach)
         assert!(active_agent.allowed_tools.contains("@server1/tool1"));
         assert!(active_agent.allowed_tools.contains("@server2/tool2"));
-        assert!(active_agent.is_server_trusted_for_sampling("server1"));
-        assert!(active_agent.is_server_trusted_for_sampling("server2"));
+        assert!(!active_agent.is_server_trusted_for_sampling("server1"));
+        assert!(!active_agent.is_server_trusted_for_sampling("server2"));
     }
 }

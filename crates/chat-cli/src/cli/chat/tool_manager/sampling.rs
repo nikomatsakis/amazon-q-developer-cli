@@ -515,15 +515,22 @@ mod tests {
     }
 
     #[test]
-    fn test_is_server_trusted_for_sampling_inherited_from_tool_trust() {
+    fn test_is_server_trusted_for_sampling_no_inheritance_from_tool_trust() {
         let mut agent = Agent::default();
 
-        // Trust an MCP tool - should automatically trust sampling from that server
+        // Trust an MCP tool - should NOT automatically trust sampling from that server
         agent.trust_mcp_tool("@docs-helper/update_readme");
 
         assert!(
+            !agent.is_server_trusted_for_sampling("docs-helper"),
+            "Server should NOT be trusted for sampling when only its tools are trusted (conservative approach)"
+        );
+        
+        // But explicit sampling trust should still work
+        agent.trust_server_for_sampling("docs-helper");
+        assert!(
             agent.is_server_trusted_for_sampling("docs-helper"),
-            "Server should be trusted for sampling when its tools are trusted"
+            "Server should be trusted for sampling when explicitly trusted"
         );
     }
 
