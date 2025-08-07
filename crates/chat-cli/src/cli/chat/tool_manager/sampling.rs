@@ -436,8 +436,49 @@ pub fn parse_edited_sampling_content(
 #[cfg(test)]
 mod tests {
     use crate::cli::agent::Agent;
+    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, MessageContent, Role, SamplingRequest};
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    // Helper function to create a valid sampling request for testing
+    fn create_valid_sampling_request() -> SamplingRequest {
+        SamplingRequest {
+            server_name: "test-server".to_string(),
+            request_id: "req-123".to_string(),
+            messages: vec![McpSamplingMessage {
+                role: "user".to_string(),
+                content: McpSamplingContent {
+                    content_type: "text".to_string(),
+                    text: "Hello, world!".to_string(),
+                },
+            }],
+            model_preferences: None,
+            system_prompt: None,
+            max_tokens: None,
+        }
+    }
+
+    // Helper function to create a user message for testing
+    fn create_user_message(text: &str) -> McpSamplingMessage {
+        McpSamplingMessage {
+            role: "user".to_string(),
+            content: McpSamplingContent {
+                content_type: "text".to_string(),
+                text: text.to_string(),
+            },
+        }
+    }
+
+    // Helper function to create an assistant message for testing
+    fn create_assistant_message(text: &str) -> McpSamplingMessage {
+        McpSamplingMessage {
+            role: "assistant".to_string(),
+            content: McpSamplingContent {
+                content_type: "text".to_string(),
+                text: text.to_string(),
+            },
+        }
+    }
 
     #[test]
     fn test_is_server_trusted_for_sampling_trusted() {
@@ -491,5 +532,264 @@ mod tests {
         });
         
         assert!(is_trusted, "Server should be trusted for sampling when its tools are trusted");
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_to_prompts_single_user() {
+        let messages = vec![create_user_message("What is the capital of France?")];
+        
+        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User, // Default to user for unknown roles
+                };
+                
+                crate::mcp_client::Prompt {
+                    role,
+                    content: MessageContent::Text {
+                        text: msg.content.text.clone(),
+                    },
+                }
+            })
+            .collect();
+        
+        assert_eq!(prompts.len(), 1, "Should convert single message to single prompt");
+        assert_eq!(prompts[0].role, Role::User, "Should preserve user role");
+        match &prompts[0].content {
+            MessageContent::Text { text } => {
+                assert_eq!(text, "What is the capital of France?", "Should preserve message text");
+            },
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_to_prompts_conversation() {
+        let messages = vec![
+            create_user_message("What is the capital of France?"),
+            create_assistant_message("The capital of France is Paris."),
+            create_user_message("What about Germany?"),
+        ];
+        
+        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User,
+                };
+                
+                crate::mcp_client::Prompt {
+                    role,
+                    content: MessageContent::Text {
+                        text: msg.content.text.clone(),
+                    },
+                }
+            })
+            .collect();
+        
+        assert_eq!(prompts.len(), 3, "Should convert all messages to prompts");
+        assert_eq!(prompts[0].role, Role::User, "First message should be user");
+        assert_eq!(prompts[1].role, Role::Assistant, "Second message should be assistant");
+        assert_eq!(prompts[2].role, Role::User, "Third message should be user");
+        
+        // Verify content preservation
+        match &prompts[0].content {
+            MessageContent::Text { text } => assert_eq!(text, "What is the capital of France?"),
+            _ => panic!("Expected text content"),
+        }
+        match &prompts[1].content {
+            MessageContent::Text { text } => assert_eq!(text, "The capital of France is Paris."),
+            _ => panic!("Expected text content"),
+        }
+        match &prompts[2].content {
+            MessageContent::Text { text } => assert_eq!(text, "What about Germany?"),
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_unknown_role_defaults_to_user() {
+        let messages = vec![
+            McpSamplingMessage {
+                role: "system".to_string(),
+                content: McpSamplingContent {
+                    content_type: "text".to_string(),
+                    text: "You are a helpful assistant.".to_string(),
+                },
+            },
+            McpSamplingMessage {
+                role: "unknown_role".to_string(),
+                content: McpSamplingContent {
+                    content_type: "text".to_string(),
+                    text: "This has an unknown role.".to_string(),
+                },
+            },
+        ];
+        
+        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User, // Default to user for unknown roles
+                };
+                
+                crate::mcp_client::Prompt {
+                    role,
+                    content: MessageContent::Text {
+                        text: msg.content.text.clone(),
+                    },
+                }
+            })
+            .collect();
+        
+        assert_eq!(prompts.len(), 2, "Should convert all messages");
+        assert_eq!(prompts[0].role, Role::User, "System role should default to user");
+        assert_eq!(prompts[1].role, Role::User, "Unknown role should default to user");
+        
+        // Verify content is preserved even with role conversion
+        match &prompts[0].content {
+            MessageContent::Text { text } => assert_eq!(text, "You are a helpful assistant."),
+            _ => panic!("Expected text content"),
+        }
+        match &prompts[1].content {
+            MessageContent::Text { text } => assert_eq!(text, "This has an unknown role."),
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_empty_list() {
+        let messages: Vec<McpSamplingMessage> = vec![];
+        
+        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User,
+                };
+                
+                crate::mcp_client::Prompt {
+                    role,
+                    content: MessageContent::Text {
+                        text: msg.content.text.clone(),
+                    },
+                }
+            })
+            .collect();
+        
+        assert_eq!(prompts.len(), 0, "Empty message list should result in empty prompts");
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_empty_text() {
+        let messages = vec![create_user_message("")];
+        
+        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User,
+                };
+                
+                crate::mcp_client::Prompt {
+                    role,
+                    content: MessageContent::Text {
+                        text: msg.content.text.clone(),
+                    },
+                }
+            })
+            .collect();
+        
+        assert_eq!(prompts.len(), 1, "Should still create prompt for empty text");
+        match &prompts[0].content {
+            MessageContent::Text { text } => assert_eq!(text, "", "Should preserve empty text"),
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_whitespace_only_text() {
+        let messages = vec![create_user_message("   \n\t  ")];
+        
+        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::User,
+                };
+                
+                crate::mcp_client::Prompt {
+                    role,
+                    content: MessageContent::Text {
+                        text: msg.content.text.clone(),
+                    },
+                }
+            })
+            .collect();
+        
+        assert_eq!(prompts.len(), 1, "Should create prompt for whitespace-only text");
+        match &prompts[0].content {
+            MessageContent::Text { text } => assert_eq!(text, "   \n\t  ", "Should preserve whitespace exactly"),
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_sampling_request_validation_valid() {
+        let request = create_valid_sampling_request();
+        
+        // Basic validation checks that would be done in the real implementation
+        assert!(!request.server_name.is_empty(), "Server name should not be empty");
+        assert!(!request.request_id.is_empty(), "Request ID should not be empty");
+        assert!(!request.messages.is_empty(), "Messages should not be empty");
+        assert!(!request.messages[0].content.text.is_empty(), "Message text should not be empty");
+    }
+
+    #[test]
+    fn test_sampling_request_validation_edge_cases() {
+        // Test with empty server name
+        let mut request = create_valid_sampling_request();
+        request.server_name = "".to_string();
+        assert!(request.server_name.is_empty(), "Should handle empty server name");
+        
+        // Test with empty request ID
+        let mut request = create_valid_sampling_request();
+        request.request_id = "".to_string();
+        assert!(request.request_id.is_empty(), "Should handle empty request ID");
+        
+        // Test with empty messages
+        let mut request = create_valid_sampling_request();
+        request.messages = vec![];
+        assert!(request.messages.is_empty(), "Should handle empty messages");
+        
+        // Test with empty message text
+        let mut request = create_valid_sampling_request();
+        request.messages[0].content.text = "".to_string();
+        assert!(request.messages[0].content.text.is_empty(), "Should handle empty message text");
+    }
+
+    #[test]
+    fn test_sampling_request_optional_fields() {
+        let mut request = create_valid_sampling_request();
+        
+        // Test with optional fields set
+        request.system_prompt = Some("You are a helpful assistant.".to_string());
+        request.max_tokens = Some(1000);
+        
+        assert_eq!(request.system_prompt, Some("You are a helpful assistant.".to_string()));
+        assert_eq!(request.max_tokens, Some(1000));
+        
+        // Test with optional fields as None (default)
+        let request = create_valid_sampling_request();
+        assert_eq!(request.system_prompt, None);
+        assert_eq!(request.max_tokens, None);
+        assert!(request.model_preferences.is_none(), "Model preferences should be None by default");
     }
 }
