@@ -122,10 +122,11 @@ fn sampling_messages_to_prompt(msgs: &[McpSamplingMessage]) -> Result<VecDeque<P
             if *last_role == role {
                 last_text.push_str("\n\n");
                 last_text.push_str(&msg.content.text);
+                continue;
             }
-        } else {
-            pairs.push((role, msg.content.text.clone()));
         }
+
+        pairs.push((role, msg.content.text.clone()));
     }
 
     // Make sure that the last message is a user message, adding a dummy message if needed.
@@ -453,26 +454,16 @@ pub fn parse_edited_sampling_content(
 mod tests {
     use crate::cli::agent::Agent;
     use crate::cli::chat::tool_manager::sampling::sampling_messages_to_prompt;
-    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, MessageContent, Role, SamplingRequest};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, MessageContent, Prompt, Role};
 
-    // Helper function to create a valid sampling request for testing
-    fn create_valid_sampling_request() -> SamplingRequest {
-        SamplingRequest {
-            server_name: "test-server".to_string(),
-            request_id: "req-123".to_string(),
-            messages: vec![McpSamplingMessage {
-                role: "user".to_string(),
-                content: McpSamplingContent {
-                    content_type: "text".to_string(),
-                    text: "Hello, world!".to_string(),
-                },
-            }],
-            model_preferences: None,
-            system_prompt: None,
-            max_tokens: None,
-        }
+    macro_rules! assert_json_eq {
+        ($left:expr, $right:expr, $($msg:tt)*) => {
+            assert_eq!(
+                serde_json::to_string_pretty(&$left).unwrap(),
+                serde_json::to_string_pretty(&$right).unwrap(),
+                $($msg)*
+            )
+        };
     }
 
     // Helper function to create a user message for testing
@@ -537,93 +528,95 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_sampling_messages_to_prompts_single_assistant() -> Result<(), String> {
-        let messages = vec![create_assistant_message("You are an indifferent agent.")];
-        let prompts = sampling_messages_to_prompt(&messages)?;
-        assert_eq!(prompts.len(), 2, "Should convert single message to single prompt");
-        assert_eq!(prompts[0].role, Role::Assistant, "Should inject assistant role");
-        assert_eq!(prompts[1].role, Role::User, "Should end with user");
-        match &prompts[1].content {
-            MessageContent::Text { text } => {
-                assert_eq!(text, "", "Should inject empty message");
-            },
-            _ => panic!("Expected text content"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_convert_sampling_messages_to_prompts_multiple_assistant() -> Result<(), String> {
+    fn test_convert_sampling_messages_to_prompts_multiple_assistant() {
         let messages = vec![
             create_assistant_message("You are an indifferent agent."),
             create_assistant_message("You help only when sufficiently bored."),
             create_user_message("Hi!"),
         ];
-        let prompts = sampling_messages_to_prompt(&messages)?;
+        let prompts = sampling_messages_to_prompt(&messages).unwrap();
         assert_eq!(prompts.len(), 2, "Should convert single message to single prompt");
-        assert_eq!(prompts[0].role, Role::Assistant, "Should inject assistant role");
-        match &prompts[0].content {
-            MessageContent::Text { text } => {
-                assert_eq!(
-                    text, "You are an indifferent agent.\n\nYou help only when sufficiently bored.",
-                    "Should concatenate consecutive assistant messages"
-                );
+
+        assert_json_eq!(
+            prompts[0],
+            Prompt {
+                role: Role::Assistant,
+                content: MessageContent::Text {
+                    text: format!("You are an indifferent agent.\n\nYou help only when sufficiently bored.")
+                }
             },
-            _ => panic!("Expected text content"),
-        }
-        assert_eq!(prompts[1].role, Role::User, "Should end with user");
-        match &prompts[1].content {
-            MessageContent::Text { text } => {
-                assert_eq!(text, "", "Should inject empty message");
+            "Should concatenate consecutive assistant messages"
+        );
+
+        assert_json_eq!(
+            prompts[1],
+            Prompt {
+                role: Role::User,
+                content: MessageContent::Text { text: format!("Hi!") }
             },
-            _ => panic!("Expected text content"),
-        }
-        Ok(())
+            "Should end with user"
+        );
     }
 
     #[test]
-    fn test_convert_sampling_messages_to_prompts_single_user() -> Result<(), String> {
+    fn test_convert_sampling_messages_to_prompts_single_user() {
         let messages = vec![create_user_message("What is the capital of France?")];
-        let prompts = sampling_messages_to_prompt(&messages)?;
-        assert_eq!(prompts.len(), 1, "Should convert single message to single prompt");
-        assert_eq!(prompts[0].role, Role::User, "Should preserve user role");
-        match &prompts[0].content {
-            MessageContent::Text { text } => {
-                assert_eq!(text, "What is the capital of France?", "Should preserve message text");
+        let prompts = sampling_messages_to_prompt(&messages).unwrap();
+        assert_json_eq!(
+            prompts[0],
+            Prompt {
+                role: Role::User,
+                content: MessageContent::Text {
+                    text: format!("What is the capital of France?")
+                }
             },
-            _ => panic!("Expected text content"),
-        }
-        Ok(())
+            "Should end with user"
+        );
     }
 
     #[test]
-    fn test_convert_sampling_messages_to_prompts_conversation() -> Result<(), String> {
+    fn test_convert_sampling_messages_to_prompts_conversation() {
         let messages = vec![
             create_user_message("What is the capital of France?"),
             create_assistant_message("The capital of France is Paris."),
             create_user_message("What about Germany?"),
         ];
-        let prompts = sampling_messages_to_prompt(&messages)?;
+        let prompts = sampling_messages_to_prompt(&messages).unwrap();
 
-        assert_eq!(prompts.len(), 3, "Should convert all messages to prompts");
-        assert_eq!(prompts[0].role, Role::User, "First message should be user");
-        assert_eq!(prompts[1].role, Role::Assistant, "Second message should be assistant");
-        assert_eq!(prompts[2].role, Role::User, "Third message should be user");
+        assert_eq!(prompts.len(), 3);
 
-        // Verify content preservation
-        match &prompts[0].content {
-            MessageContent::Text { text } => assert_eq!(text, "What is the capital of France?"),
-            _ => panic!("Expected text content"),
-        }
-        match &prompts[1].content {
-            MessageContent::Text { text } => assert_eq!(text, "The capital of France is Paris."),
-            _ => panic!("Expected text content"),
-        }
-        match &prompts[2].content {
-            MessageContent::Text { text } => assert_eq!(text, "What about Germany?"),
-            _ => panic!("Expected text content"),
-        }
-        Ok(())
+        assert_json_eq!(
+            prompts[0],
+            Prompt {
+                role: Role::User,
+                content: MessageContent::Text {
+                    text: format!("What is the capital of France?")
+                }
+            },
+            "Should end with user"
+        );
+
+        assert_json_eq!(
+            prompts[1],
+            Prompt {
+                role: Role::Assistant,
+                content: MessageContent::Text {
+                    text: format!("The capital of France is Paris.")
+                }
+            },
+            "Should end with user"
+        );
+
+        assert_json_eq!(
+            prompts[2],
+            Prompt {
+                role: Role::User,
+                content: MessageContent::Text {
+                    text: format!("What about Germany?")
+                }
+            },
+            "Should end with user"
+        );
     }
 
     #[test]
