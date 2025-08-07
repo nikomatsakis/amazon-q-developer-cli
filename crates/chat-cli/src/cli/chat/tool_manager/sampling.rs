@@ -116,16 +116,27 @@ fn sampling_messages_to_prompt(msgs: &[McpSamplingMessage]) -> Result<VecDeque<P
             Role::Assistant => Role::Assistant,
         };
 
+        // Extract text from MessageContent
+        let text = match &msg.content {
+            MessageContent::Text { text } => text.clone(),
+            MessageContent::Image { .. } => {
+                return Err("Image content not supported in sampling messages".to_string());
+            }
+            MessageContent::Resource { .. } => {
+                return Err("Resource content not supported in sampling messages".to_string());
+            }
+        };
+
         // Append consecutive messages as paragraphs.
         if let Some((last_role, last_text)) = pairs.last_mut() {
             if *last_role == role {
                 last_text.push_str("\n\n");
-                last_text.push_str(&msg.content.text);
+                last_text.push_str(&text);
                 continue;
             }
         }
 
-        pairs.push((role, msg.content.text.clone()));
+        pairs.push((role, text));
     }
 
     // Make sure that the last message is a user message, adding a dummy message if needed.
@@ -262,10 +273,16 @@ fn show_sampling_approval_dialog(request: &SamplingRequest) -> eyre::Result<Samp
         // Format the current sampling request for display
         let messages_preview = if current_request.messages.len() == 1 {
             let msg = &current_request.messages[0];
-            let preview = if msg.content.text.len() > 100 {
-                format!("{}...", &msg.content.text[..97])
-            } else {
-                msg.content.text.clone()
+            let preview = match &msg.content {
+                MessageContent::Text { text } => {
+                    if text.len() > 100 {
+                        format!("{}...", &text[..97])
+                    } else {
+                        text.clone()
+                    }
+                }
+                MessageContent::Image { .. } => "[Image content]".to_string(),
+                MessageContent::Resource { .. } => "[Resource content]".to_string(),
             };
             format!("> {}: {}", msg.role, preview)
         } else {
@@ -346,7 +363,12 @@ pub fn format_sampling_request_for_editor(request: &SamplingRequest) -> String {
         if i > 0 {
             content.push_str("\n---\n\n");
         }
-        content.push_str(&format!("{}: {}\n", message.role, message.content.text));
+        let text = match &message.content {
+            MessageContent::Text { text } => text,
+            MessageContent::Image { .. } => "[Image content - not editable]",
+            MessageContent::Resource { .. } => "[Resource content - not editable]",
+        };
+        content.push_str(&format!("{}: {}\n", message.role, text));
     }
 
     content
@@ -357,7 +379,7 @@ pub fn parse_edited_sampling_content(
     content: &str,
     original_request: &SamplingRequest,
 ) -> eyre::Result<SamplingRequest> {
-    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage};
+    use crate::mcp_client::McpSamplingMessage;
 
     let mut messages = Vec::new();
     let mut current_role: Option<Role> = None;
@@ -378,8 +400,7 @@ pub fn parse_edited_sampling_content(
             if in_message && current_role.is_some() {
                 messages.push(McpSamplingMessage {
                     role: current_role.unwrap(),
-                    content: McpSamplingContent {
-                        content_type: "text".to_string(),
+                    content: MessageContent::Text {
                         text: current_content.trim().to_string(),
                     },
                 });
@@ -409,8 +430,7 @@ pub fn parse_edited_sampling_content(
                 if in_message && current_role.is_some() {
                     messages.push(McpSamplingMessage {
                         role: current_role.unwrap(),
-                        content: McpSamplingContent {
-                            content_type: "text".to_string(),
+                        content: MessageContent::Text {
                             text: current_content.trim().to_string(),
                         },
                     });
@@ -437,8 +457,7 @@ pub fn parse_edited_sampling_content(
     if in_message && current_role.is_some() {
         messages.push(McpSamplingMessage {
             role: current_role.unwrap(),
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
+            content: MessageContent::Text {
                 text: current_content.trim().to_string(),
             },
         });
@@ -464,7 +483,7 @@ pub fn parse_edited_sampling_content(
 mod tests {
     use crate::cli::agent::Agent;
     use crate::cli::chat::tool_manager::sampling::sampling_messages_to_prompt;
-    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, MessageContent, Prompt, Role};
+    use crate::mcp_client::{McpSamplingMessage, MessageContent, Prompt, Role};
 
     macro_rules! assert_json_eq {
         ($left:expr, $right:expr, $($msg:tt)*) => {
@@ -480,8 +499,7 @@ mod tests {
     fn create_user_message(text: &str) -> McpSamplingMessage {
         McpSamplingMessage {
             role: Role::User,
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
+            content: MessageContent::Text {
                 text: text.to_string(),
             },
         }
@@ -491,8 +509,7 @@ mod tests {
     fn create_assistant_message(text: &str) -> McpSamplingMessage {
         McpSamplingMessage {
             role: Role::Assistant,
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
+            content: MessageContent::Text {
                 text: text.to_string(),
             },
         }
@@ -656,8 +673,7 @@ mod tests {
     fn test_no_user_errors() {
         let messages = vec![McpSamplingMessage {
             role: Role::Assistant,
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
+            content: MessageContent::Text {
                 text: "You are a helpful assistant.".to_string(),
             },
         }];

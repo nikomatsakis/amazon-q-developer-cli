@@ -1594,7 +1594,15 @@ fn queue_incomplete_load_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, Role, SamplingRequest};
+    use crate::mcp_client::{McpSamplingMessage, MessageContent, Role, SamplingRequest};
+
+    // Helper function to extract text from MessageContent for testing
+    fn extract_text(content: &MessageContent) -> &str {
+        match content {
+            MessageContent::Text { text } => text,
+            _ => panic!("Expected text content"),
+        }
+    }
 
     #[test]
     fn test_sanitize_server_name() {
@@ -1626,8 +1634,7 @@ mod tests {
             request_id: "req-123".to_string(),
             messages: vec![McpSamplingMessage {
                 role: Role::User,
-                content: McpSamplingContent {
-                    content_type: "text".to_string(),
+                content: MessageContent::Text {
                     text: "What is the capital of France?".to_string(),
                 },
             }],
@@ -1640,7 +1647,7 @@ mod tests {
         // exists and has the right signature
         assert_eq!(request.server_name, "test-server");
         assert_eq!(request.messages.len(), 1);
-        assert_eq!(request.messages[0].content.text, "What is the capital of France?");
+        assert_eq!(extract_text(&request.messages[0].content), "What is the capital of France?");
     }
 
     // Import sampling functions for tests
@@ -1673,8 +1680,7 @@ user: What is the capital of France?
         assert_eq!(result.max_tokens, Some(1000));
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].role, Role::User);
-        assert_eq!(result.messages[0].content.text, "What is the capital of France?");
-        assert_eq!(result.messages[0].content.content_type, "text");
+        assert_eq!(extract_text(&result.messages[0].content), "What is the capital of France?");
     }
 
     #[test]
@@ -1707,13 +1713,13 @@ user: What about Germany?
         assert_eq!(result.messages.len(), 3);
         
         assert_eq!(result.messages[0].role, Role::User);
-        assert_eq!(result.messages[0].content.text, "What is the capital of France?");
+        assert_eq!(extract_text(&result.messages[0].content), "What is the capital of France?");
         
         assert_eq!(result.messages[1].role, Role::Assistant);
-        assert_eq!(result.messages[1].content.text, "The capital of France is Paris.");
+        assert_eq!(extract_text(&result.messages[1].content), "The capital of France is Paris.");
         
         assert_eq!(result.messages[2].role, Role::User);
-        assert_eq!(result.messages[2].content.text, "What about Germany?");
+        assert_eq!(extract_text(&result.messages[2].content), "What about Germany?");
     }
 
     #[test]
@@ -1780,13 +1786,13 @@ def hello():
 print("Hello, world!")
 ```
 What does this function do?"#;
-        assert_eq!(result.messages[0].content.text, expected_user_content);
+        assert_eq!(extract_text(&result.messages[0].content), expected_user_content);
         
         let expected_assistant_content = r#"This Python function does the following:
 1. Defines a function named `hello`
 2. Prints "Hello, world!" to the console
 3. It's a simple greeting function"#;
-        assert_eq!(result.messages[1].content.text, expected_assistant_content);
+        assert_eq!(extract_text(&result.messages[1].content), expected_assistant_content);
     }
 
     #[test]
@@ -1813,7 +1819,7 @@ user: This is the actual message
         
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].role, Role::User);
-        assert_eq!(result.messages[0].content.text, "This is the actual message");
+        assert_eq!(extract_text(&result.messages[0].content), "This is the actual message");
     }
 
     #[test]
@@ -1842,9 +1848,9 @@ user: This is the actual message
         
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, Role::User);
-        assert_eq!(result.messages[0].content.text, "This message has extra whitespace");
+        assert_eq!(extract_text(&result.messages[0].content), "This message has extra whitespace");
         assert_eq!(result.messages[1].role, Role::Assistant);
-        assert_eq!(result.messages[1].content.text, "This response also has whitespace");
+        assert_eq!(extract_text(&result.messages[1].content), "This response also has whitespace");
     }
 
     #[test]
@@ -1869,9 +1875,9 @@ assistant: This should also be parsed
         
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, Role::User);
-        assert_eq!(result.messages[0].content.text, "This should be parsed");
+        assert_eq!(extract_text(&result.messages[0].content), "This should be parsed");
         assert_eq!(result.messages[1].role, Role::Assistant);
-        assert_eq!(result.messages[1].content.text, "This should also be parsed");
+        assert_eq!(extract_text(&result.messages[1].content), "This should also be parsed");
     }
 
     #[test]
@@ -1937,9 +1943,9 @@ assistant: This has content
         // Should still parse the empty user message and the assistant message
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, Role::User);
-        assert_eq!(result.messages[0].content.text, "");
+        assert_eq!(extract_text(&result.messages[0].content), "");
         assert_eq!(result.messages[1].role, Role::Assistant);
-        assert_eq!(result.messages[1].content.text, "This has content");
+        assert_eq!(extract_text(&result.messages[1].content), "This has content");
     }
 
     #[test]
@@ -1951,15 +1957,13 @@ assistant: This has content
             messages: vec![
                 McpSamplingMessage {
                     role: Role::User,
-                    content: McpSamplingContent {
-                        content_type: "text".to_string(),
+                    content: MessageContent::Text {
                         text: "What is the capital of France?".to_string(),
                     },
                 },
                 McpSamplingMessage {
                     role: Role::Assistant,
-                    content: McpSamplingContent {
-                        content_type: "text".to_string(),
+                    content: MessageContent::Text {
                         text: "The capital of France is Paris.".to_string(),
                     },
                 },

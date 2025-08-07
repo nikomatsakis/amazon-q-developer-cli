@@ -419,9 +419,8 @@ where
                                                                 // FIXME: Model name should be dynamic based on actual model used
                                                                 // FIXME: Should populate stop_reason and meta fields appropriately
                                                                 let result = crate::mcp_client::McpSamplingCreateMessageResult {
-                                                                    role: "assistant".to_string(),
-                                                                    content: crate::mcp_client::McpSamplingContent {
-                                                                        content_type: "text".to_string(),
+                                                                    role: crate::mcp_client::Role::Assistant,
+                                                                    content: crate::mcp_client::MessageContent::Text {
                                                                         text: llm_response,
                                                                     },
                                                                     model: "amazon-q".to_string(), // FIXME: Use actual model ID

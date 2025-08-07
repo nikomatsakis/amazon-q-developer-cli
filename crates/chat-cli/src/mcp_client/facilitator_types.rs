@@ -161,7 +161,7 @@ pub struct ToolCallResult {
 }
 
 /// Content of a message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum MessageContent {
     /// Text content
@@ -208,7 +208,7 @@ impl std::fmt::Display for MessageContent {
 }
 
 /// Resource contents
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ResourceContents {
     Text { text: String },
@@ -216,7 +216,7 @@ pub enum ResourceContents {
 }
 
 /// A resource in the system
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resource {
     /// Unique identifier for the resource
     pub uri: String,

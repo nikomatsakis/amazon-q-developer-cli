@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::facilitator_types::Role;
+use super::facilitator_types::{MessageContent, Role};
 
 // Message types for MCP sampling communication between actors.
 //
@@ -45,28 +45,7 @@ pub struct SamplingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpSamplingMessage {
     pub role: Role,                  // Now uses existing Role enum
-    pub content: McpSamplingContent, // NDM-FIXME: use existing MessageContent
-}
-
-/// Content of a sampling message (Phase 1: text only)
-///
-/// Conforms to the MCP specification's `TextContent` interface:
-///
-/// ```typescript
-/// interface TextContent {
-///   type: "text";
-///   text: string;
-///   annotations?: Annotations;
-///   _meta?: { [key: string]: unknown };
-/// }
-/// ```
-///
-/// Reference: [MCP specification](https://github.com/modelcontextprotocol/specification/blob/main/docs/specification/2025-06-18/schema.mdx#textcontent)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpSamplingContent {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
+    pub content: MessageContent,     // Now uses existing MessageContent enum
 }
 
 /// Model preferences from MCP sampling request
@@ -207,8 +186,8 @@ pub fn parse_sampling_request(
 /// Reference: [MCP specification](https://github.com/modelcontextprotocol/specification/blob/main/docs/specification/2025-06-18/schema.mdx#createmessageresult)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpSamplingCreateMessageResult {
-    pub role: String,
-    pub content: McpSamplingContent,
+    pub role: Role,
+    pub content: MessageContent,
     pub model: String,
     #[serde(rename = "stopReason", skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
@@ -225,9 +204,8 @@ pub fn format_sampling_response(response: SamplingResponse) -> Result<McpSamplin
     match response {
         SamplingResponse::Approved { llm_response, .. } => {
             Ok(McpSamplingCreateMessageResult {
-                role: "assistant".to_string(),
-                content: McpSamplingContent {
-                    content_type: "text".to_string(),
+                role: Role::Assistant,
+                content: MessageContent::Text {
                     text: llm_response,
                 },
                 model: "amazon-q".to_string(), // TODO: Use actual model name from Q CLI
@@ -274,7 +252,9 @@ mod tests {
         assert_eq!(request.request_id, "req-123");
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].role, Role::User);
-        assert_eq!(request.messages[0].content.text, "What is the capital of France?");
+        assert_eq!(request.messages[0].content, MessageContent::Text {
+            text: "What is the capital of France?".to_string()
+        });
         assert_eq!(request.system_prompt, Some("You are a helpful assistant.".to_string()));
         assert_eq!(request.max_tokens, Some(100));
 
@@ -291,9 +271,10 @@ mod tests {
         };
 
         let result = format_sampling_response(response).unwrap();
-        assert_eq!(result.role, "assistant");
-        assert_eq!(result.content.content_type, "text");
-        assert_eq!(result.content.text, "The capital of France is Paris.");
+        assert_eq!(result.role, Role::Assistant);
+        assert_eq!(result.content, MessageContent::Text {
+            text: "The capital of France is Paris.".to_string()
+        });
         assert_eq!(result.model, "amazon-q");
         assert_eq!(result.stop_reason, None);
     }
@@ -313,9 +294,8 @@ mod tests {
     #[test]
     fn test_create_message_result_serialization() {
         let result = McpSamplingCreateMessageResult {
-            role: "assistant".to_string(),
-            content: McpSamplingContent {
-                content_type: "text".to_string(),
+            role: Role::Assistant,
+            content: MessageContent::Text {
                 text: "Hello, world!".to_string(),
             },
             model: "amazon-q".to_string(),
