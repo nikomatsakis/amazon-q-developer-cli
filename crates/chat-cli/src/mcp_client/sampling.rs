@@ -42,8 +42,8 @@ pub struct SamplingRequest {
 /// Reference: [MCP specification](https://github.com/modelcontextprotocol/specification/blob/main/docs/specification/2025-06-18/schema.mdx#samplingmessage)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpSamplingMessage {
-    pub role: String,
-    pub content: McpSamplingContent,
+    pub role: String,                // NDM-FIXME: use existing Role
+    pub content: McpSamplingContent, // NDM-FIXME: use existing MessageContent
 }
 
 /// Content of a sampling message (Phase 1: text only)

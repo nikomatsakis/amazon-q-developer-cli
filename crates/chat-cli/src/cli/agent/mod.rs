@@ -5,71 +5,29 @@ mod root_command_args;
 mod wrapper_types;
 
 use std::borrow::Borrow;
-use std::collections::{
-    HashMap,
-    HashSet,
-};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::{
-    self,
-    Write,
-};
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
-use crossterm::style::{
-    Color,
-    Stylize as _,
-};
-use crossterm::{
-    execute,
-    queue,
-    style,
-};
+use crossterm::style::{Color, Stylize as _};
+use crossterm::{execute, queue, style};
 use eyre::bail;
 pub use mcp_config::McpServerConfig;
 pub use root_command_args::*;
-use schemars::{
-    JsonSchema,
-    schema_for,
-};
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use schemars::{JsonSchema, schema_for};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::ReadDir;
-use tracing::{
-    error,
-    info,
-    warn,
-};
+use tracing::{error, info, warn};
 use wrapper_types::ResourcePath;
-pub use wrapper_types::{
-    OriginalToolName,
-    ToolSettingTarget,
-    alias_schema,
-    tool_settings_schema,
-};
+pub use wrapper_types::{OriginalToolName, ToolSettingTarget, alias_schema, tool_settings_schema};
 
-use super::chat::tools::{
-    DEFAULT_APPROVE,
-    NATIVE_TOOLS,
-    ToolOrigin,
-};
-use crate::cli::agent::hook::{
-    Hook,
-    HookTrigger,
-};
+use super::chat::tools::{DEFAULT_APPROVE, NATIVE_TOOLS, ToolOrigin};
+use crate::cli::agent::hook::{Hook, HookTrigger};
 use crate::database::settings::Setting;
 use crate::os::Os;
-use crate::util::{
-    self,
-    MCP_SERVER_TOOL_DELIMITER,
-    directories,
-};
+use crate::util::{self, MCP_SERVER_TOOL_DELIMITER, directories};
 
 pub const DEFAULT_AGENT_NAME: &str = "q_cli_default";
 
@@ -321,11 +279,14 @@ impl Agent {
     /// Trust an MCP tool and automatically trust sampling from that server
     pub fn trust_mcp_tool(&mut self, tool_name: &str) {
         use crate::util::MCP_SERVER_TOOL_DELIMITER;
-        
+
         // Add the specific tool to allowed_tools
         self.allowed_tools.insert(tool_name.to_string());
-        
+
         // If this is an MCP tool (starts with @), also trust sampling from that server
+        //
+        // NDM-FIXME: Let's revert this behavior -- it'd make more sense to be conservative here
+        // and wait until the user explicitly trusts sampling.
         if tool_name.starts_with('@') {
             if let Some((server_name, _)) = tool_name[1..].split_once(MCP_SERVER_TOOL_DELIMITER) {
                 self.trust_server_for_sampling(server_name);
@@ -977,14 +938,14 @@ mod tests {
     #[test]
     fn test_sampling_trust_inheritance() {
         let mut agent = Agent::default();
-        
+
         // Trust an MCP tool - should automatically trust sampling from that server
         agent.trust_mcp_tool("@file-watcher/analyze_code");
-        
+
         // Should trust sampling from that server
         assert!(agent.is_server_trusted_for_sampling("file-watcher"));
         assert!(agent.allowed_tools.contains("@file-watcher/<sampling>"));
-        
+
         // Should also have the original tool
         assert!(agent.allowed_tools.contains("@file-watcher/analyze_code"));
     }
@@ -992,10 +953,10 @@ mod tests {
     #[test]
     fn test_sampling_only_trust() {
         let mut agent = Agent::default();
-        
+
         // Trust only sampling, not tools
         agent.trust_server_for_sampling("docs-helper");
-        
+
         // Should trust sampling but not have any specific tools
         assert!(agent.is_server_trusted_for_sampling("docs-helper"));
         assert!(agent.allowed_tools.contains("@docs-helper/<sampling>"));
@@ -1005,10 +966,10 @@ mod tests {
     #[test]
     fn test_non_mcp_tool_trust() {
         let mut agent = Agent::default();
-        
+
         // Trust a non-MCP tool (no @ prefix)
         agent.trust_mcp_tool("fs_read");
-        
+
         // Should have the tool but no sampling trust
         assert!(agent.allowed_tools.contains("fs_read"));
         assert!(!agent.is_server_trusted_for_sampling("fs_read"));
@@ -1020,12 +981,12 @@ mod tests {
         let agent = Agent::default();
         agents.agents.insert("test".to_string(), agent);
         agents.active_idx = "test".to_string();
-        
+
         // Trust tools via Agents interface
         agents.trust_tools(vec!["@server1/tool1".to_string(), "@server2/tool2".to_string()]);
-        
+
         let active_agent = agents.get_active().unwrap();
-        
+
         // Should trust both tools and their servers for sampling
         assert!(active_agent.allowed_tools.contains("@server1/tool1"));
         assert!(active_agent.allowed_tools.contains("@server2/tool2"));

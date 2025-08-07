@@ -3,76 +3,62 @@
 //! This module contains all the functionality for handling MCP sampling requests,
 //! including user approval dialogs, request editing, and response generation.
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use eyre;
+use std::{collections::VecDeque, sync::Arc};
+use tokio::sync::Mutex;
 
-use crate::mcp_client::{SamplingRequest, SamplingResponse, SamplingApproval};
-use crate::util::choose;
-use crate::cli::chat::{ConversationState, parser::{SendMessageStream, ResponseEvent}};
+use crate::mcp_client::{
+    McpSamplingMessage, MessageContent, Prompt, SamplingApproval, SamplingRequest, SamplingResponse,
+};
 use crate::os::Os;
+use crate::util::choose;
+use crate::{
+    cli::chat::{
+        ConversationState,
+        parser::{ResponseEvent, SendMessageStream},
+    },
+    mcp_client::Role,
+};
 
 /// Call the LLM for a sampling request
 ///
 /// Converts the MCP sampling request to Q CLI's conversation format,
 /// calls the LLM API, and extracts the final response text.
-async fn call_llm_for_sampling(
-    request: &SamplingRequest,
-    os: &Os,
-) -> Result<String, String> {
+async fn call_llm_for_sampling(request: &SamplingRequest, os: &Os) -> Result<String, String> {
     // Create a temporary conversation state for the sampling request
     let conversation_id = format!("sampling-{}", request.request_id);
-    
-    // Convert sampling request messages to MCP Prompt instances
-    let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = request.messages.iter()
-        .map(|msg| {
-            let role = match msg.role.as_str() {
-                "user" => crate::mcp_client::Role::User,
-                "assistant" => crate::mcp_client::Role::Assistant,
-                _ => crate::mcp_client::Role::User, // Default to user for unknown roles
-            };
-            
-            crate::mcp_client::Prompt {
-                role,
-                content: crate::mcp_client::MessageContent::Text {
-                    text: msg.content.text.clone(),
-                },
-            }
-        })
-        .collect();
-    
-    if prompts.is_empty() {
+
+    if request.messages.is_empty() {
         return Err("No messages found in sampling request".to_string());
     }
-    
+
+    // Convert sampling request messages to MCP Prompt instances
+    let prompts = sampling_messages_to_prompt(&request.messages)?;
+
     // Create a minimal conversation state for the sampling request
     // Note: We create a minimal state without tools/context for security
     let mut conversation_state = ConversationState::new(
         &conversation_id,
         crate::cli::agent::Agents::default(), // Empty agents for sampling
-        std::collections::HashMap::new(), // No tools for sampling
+        std::collections::HashMap::new(),     // No tools for sampling
         crate::cli::chat::tool_manager::ToolManager::default(), // Empty tool manager
-        None, // FIXME: Use model from request.model_preferences when available
-    ).await;
-    
+        None,                                 // FIXME: Use model from request.model_preferences when available
+    )
+    .await;
+
     // Use append_prompts to properly handle the MCP prompt messages
     // This ensures proper conversation history handling and role management
-    let last_message = conversation_state.append_prompts(prompts);
-    
-    // If append_prompts returned a last message, we need to set it as the next user message
-    // This is required for the conversation state to be properly prepared for LLM processing
-    if let Some(last_msg_content) = last_message {
-        conversation_state.set_next_user_message(last_msg_content).await;
-    } else {
-        return Err("No user message found in sampling request after processing prompts".to_string());
-    }
-    
+    let Some(last_message_content) = conversation_state.append_prompts(prompts) else {
+        panic!("`sampling_messages_to_prompt` ensures final message is a user message")
+    };
+    conversation_state.set_next_user_message(last_message_content).await;
+
     // Convert to sendable conversation state
     let sendable_state = conversation_state
         .as_sendable_conversation_state(os, &mut vec![], false) // No hooks for sampling
         .await
         .map_err(|e| format!("Failed to create sendable conversation state: {}", e))?;
-    
+
     // Send the message to the LLM
     let request_metadata_lock = Arc::new(Mutex::new(None));
     let mut response_stream = SendMessageStream::send_message(
@@ -80,11 +66,13 @@ async fn call_llm_for_sampling(
         sendable_state,
         request_metadata_lock,
         None, // No message meta tags
-    ).await.map_err(|e| format!("Failed to send message to LLM: {}", e))?;
-    
+    )
+    .await
+    .map_err(|e| format!("Failed to send message to LLM: {}", e))?;
+
     // Consume the response stream and extract the final text
     let mut response_text = String::new();
-    
+
     loop {
         match response_stream.recv().await {
             Some(Ok(event)) => {
@@ -107,12 +95,53 @@ async fn call_llm_for_sampling(
             },
         }
     }
-    
+
     if response_text.trim().is_empty() {
         return Err("LLM returned empty response".to_string());
     }
-    
+
     Ok(response_text.trim().to_string())
+}
+
+/// Convert a series of sampling messages into a set of prompts suitable for appending to a conversation.
+/// For reasons I don't entirely know, `ConversationState::append_prompts` expects user/assistant messages to come
+/// in pairs, and we enforce that invariant, concatenating consequence user/assisstant messages together.
+/// Returns `Err` if the final message is not a user message.
+fn sampling_messages_to_prompt(msgs: &[McpSamplingMessage]) -> Result<VecDeque<Prompt>, String> {
+    // First pass, create pairs of roles and strings
+    let mut pairs: Vec<(Role, String)> = Vec::new();
+    for msg in msgs {
+        let role = match msg.role.as_str() {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            msg_role => return Err(format!("unknown role `{msg_role}`, expected `user` or `assistant`")),
+        };
+
+        // Append consecutive messages as paragraphs.
+        if let Some((last_role, last_text)) = pairs.last_mut() {
+            if *last_role == role {
+                last_text.push_str("\n\n");
+                last_text.push_str(&msg.content.text);
+            }
+        } else {
+            pairs.push((role, msg.content.text.clone()));
+        }
+    }
+
+    // Make sure that the last message is a user message, adding a dummy message if needed.
+    let last_pair_is_user = pairs.last().map(|(role, _)| *role == Role::User).unwrap_or(false);
+    if !last_pair_is_user {
+        return Err("Final message is not a user message".to_string());
+    }
+
+    // Second pass, convert to proper prompts
+    Ok(pairs
+        .into_iter()
+        .map(|(role, text)| Prompt {
+            role,
+            content: MessageContent::Text { text },
+        })
+        .collect())
 }
 
 /// Handle a sampling request with trust checking and user approval
@@ -143,7 +172,7 @@ pub async fn handle_sampling_request(
     if is_trusted {
         // Auto-approve trusted sampling requests
         tracing::info!("Auto-approving sampling request from trusted server '{}'", server_name);
-        
+
         match call_llm_for_sampling(request, os).await {
             Ok(llm_response) => SamplingResponse::Approved {
                 request_id: request_id.clone(),
@@ -155,7 +184,7 @@ pub async fn handle_sampling_request(
                     request_id: request_id.clone(),
                     reason: format!("LLM call failed: {}", error),
                 }
-            }
+            },
         }
     } else {
         // Show user approval dialog for untrusted requests
@@ -163,11 +192,8 @@ pub async fn handle_sampling_request(
             Ok(approval) => {
                 match approval {
                     SamplingApproval::Approve(_approved_request) => {
-                        tracing::info!(
-                            "User approved sampling request from server '{}'",
-                            server_name
-                        );
-                        
+                        tracing::info!("User approved sampling request from server '{}'", server_name);
+
                         match call_llm_for_sampling(request, os).await {
                             Ok(llm_response) => SamplingResponse::Approved {
                                 request_id: request_id.clone(),
@@ -179,20 +205,17 @@ pub async fn handle_sampling_request(
                                     request_id: request_id.clone(),
                                     reason: format!("LLM call failed: {}", error),
                                 }
-                            }
+                            },
                         }
                     },
                     SamplingApproval::TrustServer => {
-                        tracing::info!(
-                            "User chose to trust sampling from server '{}'",
-                            server_name
-                        );
+                        tracing::info!("User chose to trust sampling from server '{}'", server_name);
                         // Add the server to trusted sampling
                         {
                             let mut agent_guard = agent.lock().await;
                             agent_guard.trust_server_for_sampling(server_name);
                         }
-                        
+
                         match call_llm_for_sampling(request, os).await {
                             Ok(llm_response) => SamplingResponse::Approved {
                                 request_id: request_id.clone(),
@@ -204,14 +227,11 @@ pub async fn handle_sampling_request(
                                     request_id: request_id.clone(),
                                     reason: format!("LLM call failed: {}", error),
                                 }
-                            }
+                            },
                         }
                     },
                     SamplingApproval::Reject => {
-                        tracing::info!(
-                            "User rejected sampling request from server '{}'",
-                            server_name
-                        );
+                        tracing::info!("User rejected sampling request from server '{}'", server_name);
                         SamplingResponse::Rejected {
                             request_id: request_id.clone(),
                             reason: "User rejected the sampling request".to_string(),
@@ -235,11 +255,9 @@ pub async fn handle_sampling_request(
 /// Displays a dialog asking the user whether to approve, reject, trust, or edit
 /// sampling requests from the given MCP server. The edit option allows users to
 /// modify the request content and then returns to the approval dialog.
-fn show_sampling_approval_dialog(
-    request: &SamplingRequest,
-) -> eyre::Result<SamplingApproval> {
+fn show_sampling_approval_dialog(request: &SamplingRequest) -> eyre::Result<SamplingApproval> {
     let mut current_request = request.clone();
-    
+
     loop {
         // Format the current sampling request for display
         let messages_preview = if current_request.messages.len() == 1 {
@@ -283,7 +301,7 @@ fn show_sampling_approval_dialog(
                         tracing::error!("Failed to open editor for sampling request: {}", e);
                         // Continue the loop to let user try again or choose different option
                         continue;
-                    }
+                    },
                 }
             },
             Some(2) => return Ok(SamplingApproval::Reject),
@@ -302,12 +320,10 @@ fn show_sampling_approval_dialog(
 ///
 /// Formats the sampling request as human-readable text, opens it in the user's
 /// preferred editor, and parses the result back into a SamplingRequest.
-fn open_editor_for_sampling(
-    request: &SamplingRequest,
-) -> eyre::Result<SamplingRequest> {
+fn open_editor_for_sampling(request: &SamplingRequest) -> eyre::Result<SamplingRequest> {
     // Format the sampling request as editable text
     let formatted_content = format_sampling_request_for_editor(request);
-    
+
     // Use the existing editor functionality
     match crate::cli::chat::cli::editor::open_editor(Some(formatted_content)) {
         Ok(edited_content) => {
@@ -325,14 +341,14 @@ pub fn format_sampling_request_for_editor(request: &SamplingRequest) -> String {
     content.push_str("# Edit the messages below. Lines starting with # are comments and will be ignored.\n");
     content.push_str("# Format: ROLE: message content\n");
     content.push_str("# Available roles: user, assistant, system\n\n");
-    
+
     for (i, message) in request.messages.iter().enumerate() {
         if i > 0 {
             content.push_str("\n---\n\n");
         }
         content.push_str(&format!("{}: {}\n", message.role, message.content.text));
     }
-    
+
     content
 }
 
@@ -341,21 +357,21 @@ pub fn parse_edited_sampling_content(
     content: &str,
     original_request: &SamplingRequest,
 ) -> eyre::Result<SamplingRequest> {
-    use crate::mcp_client::{McpSamplingMessage, McpSamplingContent};
-    
+    use crate::mcp_client::{McpSamplingContent, McpSamplingMessage};
+
     let mut messages = Vec::new();
     let mut current_role = String::new();
     let mut current_content = String::new();
     let mut in_message = false;
-    
+
     for line in content.lines() {
         let line = line.trim();
-        
+
         // Skip comments and empty lines
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        
+
         // Check for separator
         if line == "---" {
             // Finish current message if we have one
@@ -373,7 +389,7 @@ pub fn parse_edited_sampling_content(
             }
             continue;
         }
-        
+
         // Check for role: content pattern
         if let Some(colon_pos) = line.find(':') {
             let potential_role = line[..colon_pos].trim().to_lowercase();
@@ -388,7 +404,7 @@ pub fn parse_edited_sampling_content(
                         },
                     });
                 }
-                
+
                 // Start new message
                 current_role = potential_role;
                 current_content = line[colon_pos + 1..].trim().to_string();
@@ -396,7 +412,7 @@ pub fn parse_edited_sampling_content(
                 continue;
             }
         }
-        
+
         // If we're in a message, append to content
         if in_message {
             if !current_content.is_empty() {
@@ -405,7 +421,7 @@ pub fn parse_edited_sampling_content(
             current_content.push_str(line);
         }
     }
-    
+
     // Finish the last message
     if in_message && !current_role.is_empty() {
         messages.push(McpSamplingMessage {
@@ -416,12 +432,12 @@ pub fn parse_edited_sampling_content(
             },
         });
     }
-    
+
     // If no messages were parsed, return an error
     if messages.is_empty() {
         return Err(eyre::eyre!("No valid messages found in edited content"));
     }
-    
+
     // Create new request with edited messages
     Ok(SamplingRequest {
         server_name: original_request.server_name.clone(),
@@ -436,6 +452,7 @@ pub fn parse_edited_sampling_content(
 #[cfg(test)]
 mod tests {
     use crate::cli::agent::Agent;
+    use crate::cli::chat::tool_manager::sampling::sampling_messages_to_prompt;
     use crate::mcp_client::{McpSamplingContent, McpSamplingMessage, MessageContent, Role, SamplingRequest};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -483,78 +500,91 @@ mod tests {
     #[test]
     fn test_is_server_trusted_for_sampling_trusted() {
         let mut agent = Agent::default();
-        
+
+        assert!(
+            !agent.is_server_trusted_for_sampling("file-watcher"),
+            "Unknown server should not be trusted for sampling by default"
+        );
+        assert!(
+            !agent.is_server_trusted_for_sampling("temperature-sensor"),
+            "Unknown server should not be trusted for sampling by default"
+        );
+
         // Trust the server for sampling
         agent.trust_server_for_sampling("file-watcher");
-        
-        let agent_arc = Arc::new(Mutex::new(agent));
-        
-        // Create a simple runtime for the async call
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let is_trusted = rt.block_on(async {
-            let agent_guard = agent_arc.lock().await;
-            agent_guard.is_server_trusted_for_sampling("file-watcher")
-        });
-        
-        assert!(is_trusted, "Server should be trusted for sampling after being explicitly trusted");
-    }
 
-    #[test]
-    fn test_is_server_trusted_for_sampling_untrusted() {
-        let agent = Agent::default();
-        
-        let agent_arc = Arc::new(Mutex::new(agent));
-        
-        // Create a simple runtime for the async call
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let is_trusted = rt.block_on(async {
-            let agent_guard = agent_arc.lock().await;
-            agent_guard.is_server_trusted_for_sampling("unknown-server")
-        });
-        
-        assert!(!is_trusted, "Unknown server should not be trusted for sampling by default");
+        assert!(
+            agent.is_server_trusted_for_sampling("file-watcher"),
+            "Server should be trusted for sampling after being explicitly trusted"
+        );
+        assert!(
+            !agent.is_server_trusted_for_sampling("temperature-sensor"),
+            "Unknown server should not be trusted for sampling by default"
+        );
     }
 
     #[test]
     fn test_is_server_trusted_for_sampling_inherited_from_tool_trust() {
         let mut agent = Agent::default();
-        
+
         // Trust an MCP tool - should automatically trust sampling from that server
         agent.trust_mcp_tool("@docs-helper/update_readme");
-        
-        let agent_arc = Arc::new(Mutex::new(agent));
-        
-        // Create a simple runtime for the async call
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let is_trusted = rt.block_on(async {
-            let agent_guard = agent_arc.lock().await;
-            agent_guard.is_server_trusted_for_sampling("docs-helper")
-        });
-        
-        assert!(is_trusted, "Server should be trusted for sampling when its tools are trusted");
+
+        assert!(
+            agent.is_server_trusted_for_sampling("docs-helper"),
+            "Server should be trusted for sampling when its tools are trusted"
+        );
     }
 
     #[test]
-    fn test_convert_sampling_messages_to_prompts_single_user() {
+    fn test_convert_sampling_messages_to_prompts_single_assistant() -> Result<(), String> {
+        let messages = vec![create_assistant_message("You are an indifferent agent.")];
+        let prompts = sampling_messages_to_prompt(&messages)?;
+        assert_eq!(prompts.len(), 2, "Should convert single message to single prompt");
+        assert_eq!(prompts[0].role, Role::Assistant, "Should inject assistant role");
+        assert_eq!(prompts[1].role, Role::User, "Should end with user");
+        match &prompts[1].content {
+            MessageContent::Text { text } => {
+                assert_eq!(text, "", "Should inject empty message");
+            },
+            _ => panic!("Expected text content"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_to_prompts_multiple_assistant() -> Result<(), String> {
+        let messages = vec![
+            create_assistant_message("You are an indifferent agent."),
+            create_assistant_message("You help only when sufficiently bored."),
+            create_user_message("Hi!"),
+        ];
+        let prompts = sampling_messages_to_prompt(&messages)?;
+        assert_eq!(prompts.len(), 2, "Should convert single message to single prompt");
+        assert_eq!(prompts[0].role, Role::Assistant, "Should inject assistant role");
+        match &prompts[0].content {
+            MessageContent::Text { text } => {
+                assert_eq!(
+                    text, "You are an indifferent agent.\n\nYou help only when sufficiently bored.",
+                    "Should concatenate consecutive assistant messages"
+                );
+            },
+            _ => panic!("Expected text content"),
+        }
+        assert_eq!(prompts[1].role, Role::User, "Should end with user");
+        match &prompts[1].content {
+            MessageContent::Text { text } => {
+                assert_eq!(text, "", "Should inject empty message");
+            },
+            _ => panic!("Expected text content"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_convert_sampling_messages_to_prompts_single_user() -> Result<(), String> {
         let messages = vec![create_user_message("What is the capital of France?")];
-        
-        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "user" => Role::User,
-                    "assistant" => Role::Assistant,
-                    _ => Role::User, // Default to user for unknown roles
-                };
-                
-                crate::mcp_client::Prompt {
-                    role,
-                    content: MessageContent::Text {
-                        text: msg.content.text.clone(),
-                    },
-                }
-            })
-            .collect();
-        
+        let prompts = sampling_messages_to_prompt(&messages)?;
         assert_eq!(prompts.len(), 1, "Should convert single message to single prompt");
         assert_eq!(prompts[0].role, Role::User, "Should preserve user role");
         match &prompts[0].content {
@@ -563,38 +593,23 @@ mod tests {
             },
             _ => panic!("Expected text content"),
         }
+        Ok(())
     }
 
     #[test]
-    fn test_convert_sampling_messages_to_prompts_conversation() {
+    fn test_convert_sampling_messages_to_prompts_conversation() -> Result<(), String> {
         let messages = vec![
             create_user_message("What is the capital of France?"),
             create_assistant_message("The capital of France is Paris."),
             create_user_message("What about Germany?"),
         ];
-        
-        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "user" => Role::User,
-                    "assistant" => Role::Assistant,
-                    _ => Role::User,
-                };
-                
-                crate::mcp_client::Prompt {
-                    role,
-                    content: MessageContent::Text {
-                        text: msg.content.text.clone(),
-                    },
-                }
-            })
-            .collect();
-        
+        let prompts = sampling_messages_to_prompt(&messages)?;
+
         assert_eq!(prompts.len(), 3, "Should convert all messages to prompts");
         assert_eq!(prompts[0].role, Role::User, "First message should be user");
         assert_eq!(prompts[1].role, Role::Assistant, "Second message should be assistant");
         assert_eq!(prompts[2].role, Role::User, "Third message should be user");
-        
+
         // Verify content preservation
         match &prompts[0].content {
             MessageContent::Text { text } => assert_eq!(text, "What is the capital of France?"),
@@ -608,188 +623,32 @@ mod tests {
             MessageContent::Text { text } => assert_eq!(text, "What about Germany?"),
             _ => panic!("Expected text content"),
         }
+        Ok(())
     }
 
     #[test]
-    fn test_convert_sampling_messages_unknown_role_defaults_to_user() {
-        let messages = vec![
-            McpSamplingMessage {
-                role: "system".to_string(),
-                content: McpSamplingContent {
-                    content_type: "text".to_string(),
-                    text: "You are a helpful assistant.".to_string(),
-                },
+    fn test_unknown_role_errors() {
+        let messages = vec![McpSamplingMessage {
+            role: "unknown_role".to_string(),
+            content: McpSamplingContent {
+                content_type: "text".to_string(),
+                text: "This has an unknown role.".to_string(),
             },
-            McpSamplingMessage {
-                role: "unknown_role".to_string(),
-                content: McpSamplingContent {
-                    content_type: "text".to_string(),
-                    text: "This has an unknown role.".to_string(),
-                },
+        }];
+
+        sampling_messages_to_prompt(&messages).unwrap_err();
+    }
+
+    #[test]
+    fn test_no_user_errors() {
+        let messages = vec![McpSamplingMessage {
+            role: "assistant".to_string(),
+            content: McpSamplingContent {
+                content_type: "text".to_string(),
+                text: "You are a helpful assistant.".to_string(),
             },
-        ];
-        
-        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "user" => Role::User,
-                    "assistant" => Role::Assistant,
-                    _ => Role::User, // Default to user for unknown roles
-                };
-                
-                crate::mcp_client::Prompt {
-                    role,
-                    content: MessageContent::Text {
-                        text: msg.content.text.clone(),
-                    },
-                }
-            })
-            .collect();
-        
-        assert_eq!(prompts.len(), 2, "Should convert all messages");
-        assert_eq!(prompts[0].role, Role::User, "System role should default to user");
-        assert_eq!(prompts[1].role, Role::User, "Unknown role should default to user");
-        
-        // Verify content is preserved even with role conversion
-        match &prompts[0].content {
-            MessageContent::Text { text } => assert_eq!(text, "You are a helpful assistant."),
-            _ => panic!("Expected text content"),
-        }
-        match &prompts[1].content {
-            MessageContent::Text { text } => assert_eq!(text, "This has an unknown role."),
-            _ => panic!("Expected text content"),
-        }
-    }
+        }];
 
-    #[test]
-    fn test_convert_sampling_messages_empty_list() {
-        let messages: Vec<McpSamplingMessage> = vec![];
-        
-        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "user" => Role::User,
-                    "assistant" => Role::Assistant,
-                    _ => Role::User,
-                };
-                
-                crate::mcp_client::Prompt {
-                    role,
-                    content: MessageContent::Text {
-                        text: msg.content.text.clone(),
-                    },
-                }
-            })
-            .collect();
-        
-        assert_eq!(prompts.len(), 0, "Empty message list should result in empty prompts");
-    }
-
-    #[test]
-    fn test_convert_sampling_messages_empty_text() {
-        let messages = vec![create_user_message("")];
-        
-        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "user" => Role::User,
-                    "assistant" => Role::Assistant,
-                    _ => Role::User,
-                };
-                
-                crate::mcp_client::Prompt {
-                    role,
-                    content: MessageContent::Text {
-                        text: msg.content.text.clone(),
-                    },
-                }
-            })
-            .collect();
-        
-        assert_eq!(prompts.len(), 1, "Should still create prompt for empty text");
-        match &prompts[0].content {
-            MessageContent::Text { text } => assert_eq!(text, "", "Should preserve empty text"),
-            _ => panic!("Expected text content"),
-        }
-    }
-
-    #[test]
-    fn test_convert_sampling_messages_whitespace_only_text() {
-        let messages = vec![create_user_message("   \n\t  ")];
-        
-        let prompts: std::collections::VecDeque<crate::mcp_client::Prompt> = messages.iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "user" => Role::User,
-                    "assistant" => Role::Assistant,
-                    _ => Role::User,
-                };
-                
-                crate::mcp_client::Prompt {
-                    role,
-                    content: MessageContent::Text {
-                        text: msg.content.text.clone(),
-                    },
-                }
-            })
-            .collect();
-        
-        assert_eq!(prompts.len(), 1, "Should create prompt for whitespace-only text");
-        match &prompts[0].content {
-            MessageContent::Text { text } => assert_eq!(text, "   \n\t  ", "Should preserve whitespace exactly"),
-            _ => panic!("Expected text content"),
-        }
-    }
-
-    #[test]
-    fn test_sampling_request_validation_valid() {
-        let request = create_valid_sampling_request();
-        
-        // Basic validation checks that would be done in the real implementation
-        assert!(!request.server_name.is_empty(), "Server name should not be empty");
-        assert!(!request.request_id.is_empty(), "Request ID should not be empty");
-        assert!(!request.messages.is_empty(), "Messages should not be empty");
-        assert!(!request.messages[0].content.text.is_empty(), "Message text should not be empty");
-    }
-
-    #[test]
-    fn test_sampling_request_validation_edge_cases() {
-        // Test with empty server name
-        let mut request = create_valid_sampling_request();
-        request.server_name = "".to_string();
-        assert!(request.server_name.is_empty(), "Should handle empty server name");
-        
-        // Test with empty request ID
-        let mut request = create_valid_sampling_request();
-        request.request_id = "".to_string();
-        assert!(request.request_id.is_empty(), "Should handle empty request ID");
-        
-        // Test with empty messages
-        let mut request = create_valid_sampling_request();
-        request.messages = vec![];
-        assert!(request.messages.is_empty(), "Should handle empty messages");
-        
-        // Test with empty message text
-        let mut request = create_valid_sampling_request();
-        request.messages[0].content.text = "".to_string();
-        assert!(request.messages[0].content.text.is_empty(), "Should handle empty message text");
-    }
-
-    #[test]
-    fn test_sampling_request_optional_fields() {
-        let mut request = create_valid_sampling_request();
-        
-        // Test with optional fields set
-        request.system_prompt = Some("You are a helpful assistant.".to_string());
-        request.max_tokens = Some(1000);
-        
-        assert_eq!(request.system_prompt, Some("You are a helpful assistant.".to_string()));
-        assert_eq!(request.max_tokens, Some(1000));
-        
-        // Test with optional fields as None (default)
-        let request = create_valid_sampling_request();
-        assert_eq!(request.system_prompt, None);
-        assert_eq!(request.max_tokens, None);
-        assert!(request.model_preferences.is_none(), "Model preferences should be None by default");
+        sampling_messages_to_prompt(&messages).unwrap_err();
     }
 }
