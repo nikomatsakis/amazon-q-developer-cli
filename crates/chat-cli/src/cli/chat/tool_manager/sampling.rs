@@ -432,3 +432,64 @@ pub fn parse_edited_sampling_content(
         max_tokens: original_request.max_tokens,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::cli::agent::Agent;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn test_is_server_trusted_for_sampling_trusted() {
+        let mut agent = Agent::default();
+        
+        // Trust the server for sampling
+        agent.trust_server_for_sampling("file-watcher");
+        
+        let agent_arc = Arc::new(Mutex::new(agent));
+        
+        // Create a simple runtime for the async call
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let is_trusted = rt.block_on(async {
+            let agent_guard = agent_arc.lock().await;
+            agent_guard.is_server_trusted_for_sampling("file-watcher")
+        });
+        
+        assert!(is_trusted, "Server should be trusted for sampling after being explicitly trusted");
+    }
+
+    #[test]
+    fn test_is_server_trusted_for_sampling_untrusted() {
+        let agent = Agent::default();
+        
+        let agent_arc = Arc::new(Mutex::new(agent));
+        
+        // Create a simple runtime for the async call
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let is_trusted = rt.block_on(async {
+            let agent_guard = agent_arc.lock().await;
+            agent_guard.is_server_trusted_for_sampling("unknown-server")
+        });
+        
+        assert!(!is_trusted, "Unknown server should not be trusted for sampling by default");
+    }
+
+    #[test]
+    fn test_is_server_trusted_for_sampling_inherited_from_tool_trust() {
+        let mut agent = Agent::default();
+        
+        // Trust an MCP tool - should automatically trust sampling from that server
+        agent.trust_mcp_tool("@docs-helper/update_readme");
+        
+        let agent_arc = Arc::new(Mutex::new(agent));
+        
+        // Create a simple runtime for the async call
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let is_trusted = rt.block_on(async {
+            let agent_guard = agent_arc.lock().await;
+            agent_guard.is_server_trusted_for_sampling("docs-helper")
+        });
+        
+        assert!(is_trusted, "Server should be trusted for sampling when its tools are trusted");
+    }
+}
