@@ -36,6 +36,8 @@ use crate::cli::chat::tools::{Tool, ToolOrigin, ToolSpec};
 use crate::database::Database;
 use crate::database::settings::Setting;
 use crate::mcp_client::{JsonRpcResponse, Messenger, PromptGet};
+
+mod sampling;
 use crate::os::Os;
 use crate::telemetry::TelemetryThread;
 use crate::util::MCP_SERVER_TOOL_DELIMITER;
@@ -541,84 +543,8 @@ impl ToolManagerBuilder {
                         loading_servers.insert(server_name, std::time::Instant::now());
                     },
                     UpdateEventMessage::SamplingRequest { request, response_tx } => {
-                        // Handle sampling request with trust checking and user approval
-                        let server_name = &request.server_name;
-                        let request_id = &request.request_id;
-
-                        tracing::info!(
-                            "Received sampling request from server '{}' with request_id '{}'",
-                            server_name,
-                            request_id
-                        );
-
-                        // Check if sampling is trusted for this server using existing method
-                        let is_trusted = {
-                            let agent_guard = agent_clone.lock().await;
-                            agent_guard.is_server_trusted_for_sampling(server_name)
-                            // TODO: Also check trust_all_tools when we have access to the Agents struct
-                        };
-
-                        let response = if is_trusted {
-                            // Auto-approve trusted sampling requests
-                            tracing::info!("Auto-approving sampling request from trusted server '{}'", server_name);
-                            // TODO: Make actual LLM call here
-                            crate::mcp_client::SamplingResponse::Approved {
-                                request_id: request_id.clone(),
-                                llm_response: "This is a placeholder response for trusted sampling request.".to_string(),
-                            }
-                        } else {
-                            // Show user approval dialog for untrusted requests
-                            match show_sampling_approval_dialog(&request) {
-                                Ok(approval) => {
-                                    match approval {
-                                        crate::mcp_client::SamplingApproval::Approve(_approved_request) => {
-                                            tracing::info!(
-                                                "User approved sampling request from server '{}'",
-                                                server_name
-                                            );
-                                            // TODO: Make actual LLM call with approved_request here
-                                            crate::mcp_client::SamplingResponse::Approved {
-                                                request_id: request_id.clone(),
-                                                llm_response: "This is a placeholder response for approved sampling request.".to_string(),
-                                            }
-                                        },
-                                        crate::mcp_client::SamplingApproval::TrustServer => {
-                                            tracing::info!(
-                                                "User chose to trust sampling from server '{}'",
-                                                server_name
-                                            );
-                                            // Add the server to trusted sampling using existing method
-                                            {
-                                                let mut agent_guard = agent_clone.lock().await;
-                                                agent_guard.trust_server_for_sampling(server_name);
-                                            }
-                                            // TODO: Make actual LLM call here
-                                            crate::mcp_client::SamplingResponse::Approved {
-                                                request_id: request_id.clone(),
-                                                llm_response: "This is a placeholder response for trusted sampling request.".to_string(),
-                                            }
-                                        },
-                                        crate::mcp_client::SamplingApproval::Reject => {
-                                            tracing::info!(
-                                                "User rejected sampling request from server '{}'",
-                                                server_name
-                                            );
-                                            crate::mcp_client::SamplingResponse::Rejected {
-                                                request_id: request_id.clone(),
-                                                reason: "User rejected the sampling request".to_string(),
-                                            }
-                                        },
-                                    }
-                                },
-                                Err(e) => {
-                                    tracing::error!("Error showing sampling approval dialog: {}", e);
-                                    crate::mcp_client::SamplingResponse::Rejected {
-                                        request_id: request_id.clone(),
-                                        reason: format!("Error in approval dialog: {}", e),
-                                    }
-                                },
-                            }
-                        };
+                        // Handle sampling request using the dedicated sampling module
+                        let response = sampling::handle_sampling_request(&request, &agent_clone).await;
 
                         // Send response back through the one-shot channel to complete the request-response cycle.
                         // This delivers the user's approval decision back to the MCP client, which will then
@@ -626,8 +552,8 @@ impl ToolManagerBuilder {
                         if let Err(_) = response_tx.send(response) {
                             tracing::error!(
                                 "Failed to send sampling response for request '{}' from server '{}' - receiver dropped",
-                                request_id,
-                                server_name
+                                request.request_id,
+                                request.server_name
                             );
                         }
                     },
