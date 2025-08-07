@@ -35,7 +35,7 @@ use crate::cli::chat::tools::use_aws::UseAws;
 use crate::cli::chat::tools::{Tool, ToolOrigin, ToolSpec};
 use crate::database::Database;
 use crate::database::settings::Setting;
-use crate::mcp_client::{JsonRpcResponse, Messenger, PromptGet, SamplingRequest};
+use crate::mcp_client::{JsonRpcResponse, Messenger, PromptGet};
 use crate::os::Os;
 use crate::telemetry::TelemetryThread;
 use crate::util::MCP_SERVER_TOOL_DELIMITER;
@@ -540,7 +540,7 @@ impl ToolManagerBuilder {
                         pending_clone.write().await.insert(server_name.clone());
                         loading_servers.insert(server_name, std::time::Instant::now());
                     },
-                    UpdateEventMessage::SamplingRequest { request } => {
+                    UpdateEventMessage::SamplingRequest { request, response_tx } => {
                         // Handle sampling request with trust checking and user approval
                         let server_name = &request.server_name;
                         let request_id = &request.request_id;
@@ -558,30 +558,29 @@ impl ToolManagerBuilder {
                             // TODO: Also check trust_all_tools when we have access to the Agents struct
                         };
 
-                        if is_trusted {
+                        let response = if is_trusted {
                             // Auto-approve trusted sampling requests
                             tracing::info!("Auto-approving sampling request from trusted server '{}'", server_name);
-                            // TODO: Send approved response back to MCP server
-                            // This will be implemented when we add the response routing
+                            // TODO: Make actual LLM call here
+                            crate::mcp_client::SamplingResponse::Approved {
+                                request_id: request_id.clone(),
+                                llm_response: "This is a placeholder response for trusted sampling request.".to_string(),
+                            }
                         } else {
                             // Show user approval dialog for untrusted requests
                             match show_sampling_approval_dialog(&request) {
                                 Ok(approval) => {
                                     match approval {
-                                        crate::mcp_client::SamplingApproval::ApproveOnce => {
+                                        crate::mcp_client::SamplingApproval::Approve(_approved_request) => {
                                             tracing::info!(
                                                 "User approved sampling request from server '{}'",
                                                 server_name
                                             );
-                                            // TODO: Send approved response back to MCP server
-                                        },
-                                        crate::mcp_client::SamplingApproval::ApproveWithEdits(edited_request) => {
-                                            tracing::info!(
-                                                "User approved edited sampling request from server '{}'",
-                                                server_name
-                                            );
-                                            // TODO: Send edited request response back to MCP server
-                                            // The edited_request contains the user's modifications
+                                            // TODO: Make actual LLM call with approved_request here
+                                            crate::mcp_client::SamplingResponse::Approved {
+                                                request_id: request_id.clone(),
+                                                llm_response: "This is a placeholder response for approved sampling request.".to_string(),
+                                            }
                                         },
                                         crate::mcp_client::SamplingApproval::TrustServer => {
                                             tracing::info!(
@@ -593,22 +592,43 @@ impl ToolManagerBuilder {
                                                 let mut agent_guard = agent_clone.lock().await;
                                                 agent_guard.trust_server_for_sampling(server_name);
                                             }
-                                            // TODO: Send approved response back to MCP server
+                                            // TODO: Make actual LLM call here
+                                            crate::mcp_client::SamplingResponse::Approved {
+                                                request_id: request_id.clone(),
+                                                llm_response: "This is a placeholder response for trusted sampling request.".to_string(),
+                                            }
                                         },
                                         crate::mcp_client::SamplingApproval::Reject => {
                                             tracing::info!(
                                                 "User rejected sampling request from server '{}'",
                                                 server_name
                                             );
-                                            // TODO: Send rejection response back to MCP server
+                                            crate::mcp_client::SamplingResponse::Rejected {
+                                                request_id: request_id.clone(),
+                                                reason: "User rejected the sampling request".to_string(),
+                                            }
                                         },
                                     }
                                 },
                                 Err(e) => {
                                     tracing::error!("Error showing sampling approval dialog: {}", e);
-                                    // TODO: Send error response back to MCP server
+                                    crate::mcp_client::SamplingResponse::Rejected {
+                                        request_id: request_id.clone(),
+                                        reason: format!("Error in approval dialog: {}", e),
+                                    }
                                 },
                             }
+                        };
+
+                        // Send response back through the one-shot channel to complete the request-response cycle.
+                        // This delivers the user's approval decision back to the MCP client, which will then
+                        // format and send the appropriate JSON-RPC response back to the MCP server.
+                        if let Err(_) = response_tx.send(response) {
+                            tracing::error!(
+                                "Failed to send sampling response for request '{}' from server '{}' - receiver dropped",
+                                request_id,
+                                server_name
+                            );
                         }
                     },
                 }
@@ -1414,12 +1434,8 @@ fn show_sampling_approval_dialog(
 
         match choose(&prompt, &options)? {
             Some(0) => {
-                // If content was edited, return the edited version
-                if messages_have_changed(&current_request.messages, &request.messages) {
-                    return Ok(SamplingApproval::ApproveWithEdits(current_request));
-                } else {
-                    return Ok(SamplingApproval::ApproveOnce);
-                }
+                // Return the current request (which may or may not have been edited)
+                return Ok(SamplingApproval::Approve(current_request));
             },
             Some(1) => {
                 // Open editor with the current sampling request content
@@ -1446,24 +1462,6 @@ fn show_sampling_approval_dialog(
             },
         }
     }
-}
-
-/// Check if sampling messages have been modified
-fn messages_have_changed(
-    current: &[crate::mcp_client::McpSamplingMessage],
-    original: &[crate::mcp_client::McpSamplingMessage],
-) -> bool {
-    if current.len() != original.len() {
-        return true;
-    }
-    
-    for (curr, orig) in current.iter().zip(original.iter()) {
-        if curr.role != orig.role || curr.content.text != orig.content.text {
-            return true;
-        }
-    }
-    
-    false
 }
 
 /// Open editor for sampling request editing

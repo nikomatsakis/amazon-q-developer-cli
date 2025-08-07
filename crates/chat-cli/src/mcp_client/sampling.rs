@@ -125,9 +125,13 @@ pub enum SamplingResponse {
 /// Used internally by Q CLI's UI Actor to determine how to respond to sampling requests.
 #[derive(Debug, Clone)]
 pub enum SamplingApproval {
-    ApproveOnce,
-    ApproveWithEdits(SamplingRequest),
+    /// User approved the sampling request (may or may not have been edited)
+    Approve(SamplingRequest),
+    /// User rejected the sampling request - will send an error response back to MCP server
     Reject,
+    /// User chose to trust this server for all future sampling requests.
+    /// The current request will be approved, and the server will be added to the trusted list
+    /// so future sampling requests from this server are auto-approved without user interaction.
     TrustServer,
 }
 

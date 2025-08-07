@@ -12,6 +12,7 @@ use crate::mcp_client::{
     ResourcesListResult,
     ToolsListResult,
     SamplingRequest,
+    SamplingResponse,
 };
 
 #[allow(dead_code)]
@@ -36,8 +37,18 @@ pub enum UpdateEventMessage {
     InitStart {
         server_name: String,
     },
+    /// MCP sampling request that requires user approval.
+    /// 
+    /// This message carries both the sampling request data and a response channel.
+    /// The UI Actor will show an approval dialog to the user, then send the decision
+    /// back through the response channel to complete the request-response cycle.
     SamplingRequest {
+        /// The sampling request data from the MCP server containing messages, preferences, etc.
         request: SamplingRequest,
+        /// One-shot channel for sending the user's approval decision back to the MCP client.
+        /// This creates a direct response path from UI Actor → MCP Client → MCP Server,
+        /// completing the request-response cycle for sampling requests.
+        response_tx: tokio::sync::oneshot::Sender<SamplingResponse>,
     },
 }
 
@@ -131,10 +142,10 @@ impl Messenger for ServerMessenger {
             .map_err(|e| MessengerError::Custom(e.to_string()))?)
     }
 
-    async fn send_sampling_request(&self, request: SamplingRequest) -> Result<(), MessengerError> {
+    async fn send_sampling_request(&self, request: SamplingRequest, response_tx: tokio::sync::oneshot::Sender<SamplingResponse>) -> Result<(), MessengerError> {
         Ok(self
             .update_event_sender
-            .send(UpdateEventMessage::SamplingRequest { request })
+            .send(UpdateEventMessage::SamplingRequest { request, response_tx })
             .await
             .map_err(|e| MessengerError::Custom(e.to_string()))?)
     }
