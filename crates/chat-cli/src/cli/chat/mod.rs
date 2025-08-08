@@ -3342,4 +3342,197 @@ mod tests {
             assert_eq!(actual, *expected, "expected {} for input {}", expected, input);
         }
     }
+
+    #[tokio::test]
+    async fn test_mcp_sampling_workflow() {
+        // let _ = tracing_subscriber::fmt::try_init();
+        let mut os = Os::new().await.unwrap();
+        
+        // Mock LLM responses for the sampling requests
+        // Each array represents one LLM response to a sampling request
+        os.client.set_mock_output(serde_json::json!([
+            // Response to first sampling request (user approves once)
+            [
+                "The capital of France is Paris."
+            ],
+            // Response to second sampling request (user trusts server)
+            [
+                "The capital of Germany is Berlin."
+            ],
+            // Response to third sampling request (auto-approved, server trusted)
+            [
+                "The capital of Italy is Rome."
+            ],
+            // Response to fifth sampling request (after untrust, user approves once)
+            [
+                "The capital of Spain is Madrid."
+            ]
+        ]));
+
+        let mut agents = get_test_agents(&os).await;
+        let tool_manager = ToolManager::default();
+        let tool_config = serde_json::from_str::<HashMap<String, ToolSpec>>(include_str!("tools/tool_index.json"))
+            .expect("Tools failed to load");
+
+        // TODO: This is a framework test for MCP sampling integration
+        // To make this fully functional, we need to:
+        // 1. Set up the test MCP server to send sampling requests
+        // 2. Configure the ToolManager to connect to the test MCP server
+        // 3. Implement the actual sampling request/response cycle
+        
+        // The test would simulate this workflow:
+        let _mock_inputs = vec![
+            // Test 1: MCP server sends sampling request, user approves once
+            // (This would be triggered by the MCP server, not user input)
+            "y".to_string(), // User approves the sampling request once
+            
+            // Test 2: MCP server sends another sampling request, user trusts server
+            "t".to_string(), // User trusts the server for sampling
+            
+            // Test 3: MCP server sends sampling request, auto-approved (server trusted)
+            // (No user input needed - should be auto-approved)
+            
+            // Test 4: Untrust the server, then reject a sampling request
+            "/tools untrust @test-server/<sampling>".to_string(),
+            "n".to_string(), // User rejects the sampling request
+            
+            // Test 5: User approves once after untrusting
+            "y".to_string(), // User approves once
+            
+            "exit".to_string(),
+        ];
+
+        // Verify initial state - no servers trusted for sampling
+        assert!(!agents.get_active().unwrap().is_server_trusted_for_sampling("test-server"));
+        
+        // This test demonstrates the testing framework needed for MCP sampling
+        // The actual implementation would require:
+        // 1. Starting the test MCP server as a subprocess
+        // 2. Configuring it to send sampling requests at specific times
+        // 3. Verifying the complete request-response cycle
+        // 4. Checking trust state changes throughout the workflow
+        
+        println!("MCP sampling test framework ready - needs full MCP server integration");
+    }
+
+    #[tokio::test]
+    #[ignore] // Ignore by default since it requires building the test MCP server
+    async fn test_mcp_sampling_with_real_server() {
+        // let _ = tracing_subscriber::fmt::try_init();
+        
+        // Build the test MCP server binary
+        std::process::Command::new("cargo")
+            .args(["build", "--bin", "test_mcp_server"])
+            .status()
+            .expect("Failed to build test MCP server binary");
+        
+        let mut os = Os::new().await.unwrap();
+        
+        // Mock LLM responses for the sampling requests
+        os.client.set_mock_output(serde_json::json!([
+            // Response to first sampling request (user approves once)
+            [
+                "The capital of France is Paris."
+            ],
+            // Response to second sampling request (user trusts server)  
+            [
+                "The capital of Germany is Berlin."
+            ],
+            // Response to third sampling request (auto-approved, server trusted)
+            [
+                "The capital of Italy is Rome."
+            ]
+        ]));
+
+        let mut agents = get_test_agents(&os).await;
+        
+        // Create a ToolManager configured with the test MCP server
+        let mut tool_manager = ToolManager::default();
+        
+        // TODO: Configure the tool manager to connect to the test MCP server
+        // This would involve:
+        // 1. Setting up MCP server configuration
+        // 2. Starting the test server process
+        // 3. Establishing the connection
+        
+        let tool_config = serde_json::from_str::<HashMap<String, ToolSpec>>(include_str!("tools/tool_index.json"))
+            .expect("Tools failed to load");
+
+        // Create a chat session that will interact with the MCP server
+        let mut session = ChatSession::new(
+            &mut os,
+            std::io::stdout(),
+            std::io::stderr(),
+            "fake_conv_id",
+            agents,
+            None,
+            InputSource::new_mock(vec![
+                // Trigger the test MCP server to send a sampling request
+                "trigger_mcp_sampling".to_string(),
+                "y".to_string(), // User approves the sampling request once
+                
+                // Trigger another sampling request, user trusts server
+                "trigger_mcp_sampling".to_string(), 
+                "t".to_string(), // User trusts the server for sampling
+                
+                // Trigger third sampling request, should be auto-approved
+                "trigger_mcp_sampling".to_string(),
+                // No user input needed - should be auto-approved
+                
+                "exit".to_string(),
+            ]),
+            false,
+            || Some(80),
+            tool_manager,
+            None,
+            tool_config,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // TODO: Actually run the session and verify the results
+        // session.spawn(&mut os).await.unwrap();
+        
+        // Verify that sampling trust was properly managed
+        // After the 't' command, the server should be trusted for sampling
+        // assert!(agents.get_active().unwrap().is_server_trusted_for_sampling("test_mcp_server"));
+        
+        println!("MCP sampling integration test with real server - implementation needed");
+    }
+
+    #[test]
+    fn test_mcp_sampling_trust_commands() {
+        use crate::cli::agent::{Agent, Agents};
+        
+        // Test the trust commands for MCP sampling
+        let mut agents = Agents::default();
+        let agent = Agent::default();
+        agents.agents.insert("test".to_string(), agent);
+        agents.active_idx = "test".to_string();
+
+        // Initially, no servers should be trusted for sampling
+        assert!(!agents.get_active().unwrap().is_server_trusted_for_sampling("test-server"));
+        
+        // Test trusting a server for sampling
+        agents.get_active_mut().unwrap().trust_server_for_sampling("test-server");
+        assert!(agents.get_active().unwrap().is_server_trusted_for_sampling("test-server"));
+        
+        // Test that trusting an MCP tool does NOT automatically trust sampling (conservative approach)
+        agents.get_active_mut().unwrap().trust_mcp_tool("@another-server/some-tool");
+        assert!(!agents.get_active().unwrap().is_server_trusted_for_sampling("another-server"));
+        
+        // Test untrusting sampling (via the pseudo-tool pattern)
+        let active_agent = agents.get_active_mut().unwrap();
+        active_agent.allowed_tools.remove("@test-server/<sampling>");
+        assert!(!agents.get_active().unwrap().is_server_trusted_for_sampling("test-server"));
+        
+        // Test the trust_tools interface doesn't inherit sampling trust
+        agents.trust_tools(vec!["@third-server/tool1".to_string(), "@third-server/tool2".to_string()]);
+        assert!(!agents.get_active().unwrap().is_server_trusted_for_sampling("third-server"));
+        
+        // But the tools themselves should be trusted
+        assert!(agents.get_active().unwrap().allowed_tools.contains("@third-server/tool1"));
+        assert!(agents.get_active().unwrap().allowed_tools.contains("@third-server/tool2"));
+    }
 }
