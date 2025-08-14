@@ -19,13 +19,15 @@ use thiserror::Error;
 use tokio::time;
 use tokio::time::error::Elapsed;
 
+use super::error::ErrorCode;
+use super::sampling::parse_sampling_request;
 use super::transport::base_protocol::{
+    JsonRpcError,
     JsonRpcMessage,
     JsonRpcNotification,
     JsonRpcRequest,
-    JsonRpcVersion,
     JsonRpcResponse as JsonRpcResponseMessage,
-    JsonRpcError,
+    JsonRpcVersion,
 };
 use super::transport::stdio::JsonRpcStdioTransport;
 use super::transport::{
@@ -46,12 +48,10 @@ use super::{
     ServerCapabilities,
     ToolsListResult,
 };
-use super::error::ErrorCode;
 use crate::util::process::{
     Pid,
     terminate_process,
 };
-use super::sampling::parse_sampling_request;
 
 pub type ClientInfo = serde_json::Value;
 pub type StdioTransport = JsonRpcStdioTransport;
@@ -380,31 +380,34 @@ where
                                 match method.as_str() {
                                     "sampling/createMessage" => {
                                         if let Some(ref messenger) = messenger_ref {
-                                            match parse_sampling_request(
-                                                server_name.clone(),
-                                                id.to_string(),
-                                                params,
-                                            ) {
+                                            match parse_sampling_request(server_name.clone(), id.to_string(), params) {
                                                 Ok(sampling_request) => {
                                                     // Create one-shot channel for bidirectional communication:
                                                     // - response_tx goes to UI Actor for sending back approval decision
                                                     // - response_rx stays here to wait for the user's response
-                                                    // This enables: MCP Server → MCP Client → UI Actor → MCP Client → MCP Server
+                                                    // This enables: MCP Server → MCP Client → UI Actor → MCP Client →
+                                                    // MCP Server
                                                     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                                                    
+
                                                     // Send request with response channel
-                                                    if let Err(e) = messenger.send_sampling_request(sampling_request, response_tx).await {
+                                                    if let Err(e) = messenger
+                                                        .send_sampling_request(sampling_request, response_tx)
+                                                        .await
+                                                    {
                                                         tracing::error!(
                                                             "Failed to send sampling request from {}: {:?}",
                                                             server_name,
                                                             e
                                                         );
                                                         // Send error response back to MCP server
-                                                        if let Err(response_err) = client_ref.send_error_response(
-                                                            id.to_string(),
-                                                            ErrorCode::InternalError,
-                                                            "Failed to send sampling request to UI".to_string(),
-                                                        ).await {
+                                                        if let Err(response_err) = client_ref
+                                                            .send_error_response(
+                                                                id.to_string(),
+                                                                ErrorCode::InternalError,
+                                                                "Failed to send sampling request to UI".to_string(),
+                                                            )
+                                                            .await
+                                                        {
                                                             tracing::error!(
                                                                 "Failed to send error response to {}: {:?}",
                                                                 server_name,
@@ -414,28 +417,41 @@ where
                                                     } else {
                                                         // Wait for response from UI Actor
                                                         match response_rx.await {
-                                                            Ok(crate::mcp_client::SamplingResponse::Approved { llm_response, .. }) => {
+                                                            Ok(crate::mcp_client::SamplingResponse::Approved {
+                                                                llm_response,
+                                                                ..
+                                                            }) => {
                                                                 // Send success response back to MCP server
-                                                                // FIXME: Model name should be dynamic based on actual model used
-                                                                // FIXME: Should populate stop_reason and meta fields appropriately
-                                                                let result = crate::mcp_client::McpSamplingCreateMessageResult {
-                                                                    role: crate::mcp_client::Role::Assistant,
-                                                                    content: crate::mcp_client::MessageContent::Text {
-                                                                        text: llm_response,
-                                                                    },
-                                                                    model: "amazon-q".to_string(), // FIXME: Use actual model ID
-                                                                    stop_reason: None, // FIXME: Extract from LLM response metadata
-                                                                    meta: None, // FIXME: Include token usage and other metadata
-                                                                };
-                                                                
+                                                                // FIXME: Model name should be dynamic based on actual
+                                                                // model used
+                                                                // FIXME: Should populate stop_reason and meta fields
+                                                                // appropriately
+                                                                let result =
+                                                                    crate::mcp_client::McpSamplingCreateMessageResult {
+                                                                        role: crate::mcp_client::Role::Assistant,
+                                                                        content:
+                                                                            crate::mcp_client::MessageContent::Text {
+                                                                                text: llm_response,
+                                                                            },
+                                                                        model: "amazon-q".to_string(), /* FIXME: Use
+                                                                                                        * actual model
+                                                                                                        * ID */
+                                                                        stop_reason: None, /* FIXME: Extract from LLM
+                                                                                            * response metadata */
+                                                                        meta: None, /* FIXME: Include token usage and
+                                                                                     * other metadata */
+                                                                    };
+
                                                                 let response = JsonRpcResponseMessage {
                                                                     jsonrpc: JsonRpcVersion::default(),
-                                                                    id: id,
-                                                                    result: Some(serde_json::to_value(result).unwrap()), // FIXME: Handle serialization errors
+                                                                    id,
+                                                                    result: Some(serde_json::to_value(result).unwrap()), /* FIXME: Handle serialization errors */
                                                                     error: None,
                                                                 };
-                                                                
-                                                                if let Err(send_err) = client_ref.send_response(response).await {
+
+                                                                if let Err(send_err) =
+                                                                    client_ref.send_response(response).await
+                                                                {
                                                                     tracing::error!(
                                                                         "Failed to send success response to {}: {:?}",
                                                                         server_name,
@@ -443,14 +459,26 @@ where
                                                                     );
                                                                 }
                                                             },
-                                                            Ok(crate::mcp_client::SamplingResponse::Rejected { reason, .. }) => {
+                                                            Ok(crate::mcp_client::SamplingResponse::Rejected {
+                                                                reason,
+                                                                ..
+                                                            }) => {
                                                                 // Send error response back to MCP server
-                                                                // FIXME: Use more specific error codes based on rejection reason
-                                                                if let Err(response_err) = client_ref.send_error_response(
-                                                                    id.to_string(),
-                                                                    ErrorCode::InvalidRequest, // FIXME: Should be more specific error code
-                                                                    format!("Sampling request rejected: {}", reason),
-                                                                ).await {
+                                                                // FIXME: Use more specific error codes based on
+                                                                // rejection reason
+                                                                if let Err(response_err) = client_ref
+                                                                    .send_error_response(
+                                                                        id.to_string(),
+                                                                        ErrorCode::InvalidRequest, /* FIXME: Should
+                                                                                                    * be more specific
+                                                                                                    * error code */
+                                                                        format!(
+                                                                            "Sampling request rejected: {}",
+                                                                            reason
+                                                                        ),
+                                                                    )
+                                                                    .await
+                                                                {
                                                                     tracing::error!(
                                                                         "Failed to send rejection response to {}: {:?}",
                                                                         server_name,
@@ -459,20 +487,28 @@ where
                                                                 }
                                                             },
                                                             Err(_) => {
-                                                                // Channel was dropped - UI Actor crashed or request was cancelled
-                                                                tracing::error!("Sampling response channel was dropped for server '{}'", server_name);
-                                                                if let Err(response_err) = client_ref.send_error_response(
-                                                                    id.to_string(),
-                                                                    ErrorCode::InternalError,
-                                                                    "Internal error processing sampling request".to_string(),
-                                                                ).await {
+                                                                // Channel was dropped - UI Actor crashed or request was
+                                                                // cancelled
+                                                                tracing::error!(
+                                                                    "Sampling response channel was dropped for server '{}'",
+                                                                    server_name
+                                                                );
+                                                                if let Err(response_err) = client_ref
+                                                                    .send_error_response(
+                                                                        id.to_string(),
+                                                                        ErrorCode::InternalError,
+                                                                        "Internal error processing sampling request"
+                                                                            .to_string(),
+                                                                    )
+                                                                    .await
+                                                                {
                                                                     tracing::error!(
                                                                         "Failed to send error response to {}: {:?}",
                                                                         server_name,
                                                                         response_err
                                                                     );
                                                                 }
-                                                            }
+                                                            },
                                                         }
                                                     }
                                                 },
@@ -483,11 +519,14 @@ where
                                                         e
                                                     );
                                                     // Send JSON-RPC error response back to server
-                                                    if let Err(response_err) = client_ref.send_error_response(
-                                                        id.to_string(),
-                                                        ErrorCode::InvalidParams,
-                                                        format!("Failed to parse sampling request: {}", e),
-                                                    ).await {
+                                                    if let Err(response_err) = client_ref
+                                                        .send_error_response(
+                                                            id.to_string(),
+                                                            ErrorCode::InvalidParams,
+                                                            format!("Failed to parse sampling request: {}", e),
+                                                        )
+                                                        .await
+                                                    {
                                                         tracing::error!(
                                                             "Failed to send error response to {}: {:?}",
                                                             server_name,
@@ -502,11 +541,14 @@ where
                                                 server_name
                                             );
                                             // Send JSON-RPC error response back to server
-                                            if let Err(response_err) = client_ref.send_error_response(
-                                                id.to_string(),
-                                                ErrorCode::InternalError,
-                                                "No messenger available to handle sampling request".to_string(),
-                                            ).await {
+                                            if let Err(response_err) = client_ref
+                                                .send_error_response(
+                                                    id.to_string(),
+                                                    ErrorCode::InternalError,
+                                                    "No messenger available to handle sampling request".to_string(),
+                                                )
+                                                .await
+                                            {
                                                 tracing::error!(
                                                     "Failed to send error response to {}: {:?}",
                                                     server_name,
@@ -738,17 +780,14 @@ where
 
     /// Sends a JSON-RPC success response back to the server
     /// Used when we need to respond to a server request with a result
-    async fn send_response(
-        &self,
-        response: JsonRpcResponseMessage,
-    ) -> Result<(), ClientError> {
+    async fn send_response(&self, response: JsonRpcResponseMessage) -> Result<(), ClientError> {
         let msg = JsonRpcMessage::Response(response);
         let send_map_err = |e: Elapsed| (e, "success_response".to_string());
-        
+
         time::timeout(Duration::from_millis(self.timeout), self.transport.send(&msg))
             .await
             .map_err(send_map_err)??;
-            
+
         Ok(())
     }
 
@@ -770,14 +809,14 @@ where
                 data: None,
             }),
         };
-        
+
         let msg = JsonRpcMessage::Response(error_response);
         let send_map_err = |e: Elapsed| (e, "error_response".to_string());
-        
+
         time::timeout(Duration::from_millis(self.timeout), self.transport.send(&msg))
             .await
             .map_err(send_map_err)??;
-            
+
         Ok(())
     }
 

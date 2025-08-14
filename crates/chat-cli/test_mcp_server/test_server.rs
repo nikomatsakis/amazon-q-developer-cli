@@ -1,29 +1,21 @@
 //! This is a bin used solely for testing the client
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{
-    AtomicU8,
-    Ordering,
-};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use chat_cli::{
-    self,
-    JsonRpcRequest,
-    JsonRpcResponse,
-    JsonRpcStdioTransport,
-    PreServerRequestHandler,
-    Response,
-    Server,
-    ServerError,
-    ServerRequestHandler,
+    self, ExpectedResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcStdioTransport,
+    PreServerRequestHandler, Response, Server, ServerError, ServerRequestHandler,
 };
 use tokio::sync::Mutex;
 
 #[derive(Default)]
 struct Handler {
-    pending_request: Option<Box<dyn Fn(u64) -> Option<JsonRpcRequest> + Send + Sync>>,
+    pending_request: Option<Box<dyn Fn(u64) -> Option<(JsonRpcRequest, ExpectedResponse)> + Send + Sync>>,
     #[allow(clippy::type_complexity)]
-    send_request: Option<Box<dyn Fn(&str, Option<serde_json::Value>) -> Result<(), ServerError> + Send + Sync>>,
+    send_request:
+        Option<Box<dyn Fn(&str, serde_json::Value, ExpectedResponse) -> Result<(), ServerError> + Send + Sync>>,
+    send_notification: Option<Box<dyn Fn(&str) -> Result<(), ServerError> + Send + Sync>>,
     storage: Mutex<HashMap<String, serde_json::Value>>,
     tool_spec: Mutex<HashMap<String, Response>>,
     tool_spec_key_list: Mutex<Vec<String>>,
@@ -35,16 +27,20 @@ struct Handler {
 impl PreServerRequestHandler for Handler {
     fn register_pending_request_callback(
         &mut self,
-        cb: impl Fn(u64) -> Option<JsonRpcRequest> + Send + Sync + 'static,
+        cb: impl Fn(u64) -> Option<(JsonRpcRequest, ExpectedResponse)> + Send + Sync + 'static,
     ) {
         self.pending_request = Some(Box::new(cb));
     }
 
     fn register_send_request_callback(
         &mut self,
-        cb: impl Fn(&str, Option<serde_json::Value>) -> Result<(), ServerError> + Send + Sync + 'static,
+        cb: impl Fn(&str, serde_json::Value, ExpectedResponse) -> Result<(), ServerError> + Send + Sync + 'static,
     ) {
         self.send_request = Some(Box::new(cb));
+    }
+
+    fn register_notification_callback(&mut self, cb: impl Fn(&str) -> Result<(), ServerError> + Send + Sync + 'static) {
+        self.send_notification = Some(Box::new(cb));
     }
 }
 
@@ -114,6 +110,7 @@ impl ServerRequestHandler for Handler {
                     eprintln!("Failed to convert to mock specs from value");
                     return Ok(None);
                 };
+                eprintln!("mock_specs = {mock_specs:#?}");
                 let self_tool_specs = self.tool_spec.lock().await;
                 let mut self_tool_spec_key_list = self.tool_spec_key_list.lock().await;
                 let _ = mock_specs.iter().fold(self_tool_specs, |mut acc, spec| {
@@ -128,64 +125,42 @@ impl ServerRequestHandler for Handler {
                     acc.insert(key, spec.get("value").cloned());
                     acc
                 });
+                eprintln!("self_tool_spec_key_list = {self_tool_spec_key_list:#?}");
                 Ok(None)
             },
             "tools/list" => {
-                if let Some(params) = params {
-                    if let Some(cursor) = params.get("cursor").cloned() {
-                        let Ok(cursor) = serde_json::from_value::<String>(cursor) else {
-                            eprintln!("Failed to convert cursor to string: {:#?}", params);
+                let tool_spec_key_list = self.tool_spec_key_list.lock().await;
+                let tool_spec = self.tool_spec.lock().await;
+
+                let cursor = match params {
+                    Some(params) => match params.get("cursor") {
+                        Some(cursor) => Some(serde_json::from_value::<String>(cursor.clone())?),
+                        None => {
+                            eprintln!("params exist but cursor is missing");
                             return Ok(None);
-                        };
-                        let self_tool_spec_key_list = self.tool_spec_key_list.lock().await;
-                        let self_tool_spec = self.tool_spec.lock().await;
-                        let (next_cursor, spec) = {
-                            'blk: {
-                                for (i, item) in self_tool_spec_key_list.iter().enumerate() {
-                                    if item == &cursor {
-                                        break 'blk (
-                                            self_tool_spec_key_list.get(i + 1).cloned(),
-                                            self_tool_spec.get(&cursor).cloned().unwrap(),
-                                        );
-                                    }
-                                }
-                                (None, None)
-                            }
-                        };
-                        if let Some(next_cursor) = next_cursor {
-                            return Ok(Some(serde_json::json!({
-                                "tools": [spec.unwrap()],
-                                "nextCursor": next_cursor,
-                            })));
-                        } else {
-                            return Ok(Some(serde_json::json!({
-                                "tools": [spec.unwrap()],
-                            })));
-                        }
-                    } else {
-                        eprintln!("Params exist but cursor is missing");
-                        return Ok(None);
-                    }
-                } else {
-                    let tool_spec_key_list = self.tool_spec_key_list.lock().await;
-                    let tool_spec = self.tool_spec.lock().await;
-                    let first_key = tool_spec_key_list
-                        .first()
-                        .expect("First key missing from tool specs")
-                        .clone();
-                    let first_value = tool_spec
-                        .get(&first_key)
-                        .expect("First value missing from tool specs")
-                        .clone();
-                    let second_key = tool_spec_key_list
-                        .get(1)
-                        .expect("Second key missing from tool specs")
-                        .clone();
-                    return Ok(Some(serde_json::json!({
-                        "tools": [first_value],
-                        "nextCursor": second_key
-                    })));
+                        },
+                    },
+                    None => None,
                 };
+
+                // Interpret cursor (if provided) as the name of the last spec that was given.
+                // So the next spec should be index + 1.
+                let cursor_index = match cursor {
+                    Some(c) => match tool_spec_key_list.iter().position(|item| *item == c) {
+                        Some(i) => i + 1,
+                        None => tool_spec_key_list.len(), // bogus cursor
+                    },
+                    None => 0,
+                };
+
+                // Either provide a single spec or an empty list (if at the end of the list).
+                match tool_spec_key_list.get(cursor_index) {
+                    Some(spec_name) => Ok(Some(serde_json::json!({
+                        "tools": [tool_spec.get(spec_name).unwrap()],
+                        "nextCursor": spec_name,
+                    }))),
+                    None => Ok(Some(serde_json::json!({"tools": []}))),
+                }
             },
             "get_env_vars" => {
                 let kv = std::env::vars().fold(HashMap::<String, String>::new(), |mut acc, (k, v)| {
@@ -195,11 +170,20 @@ impl ServerRequestHandler for Handler {
                 Ok(Some(serde_json::json!(kv)))
             },
             // This is a test path relevant only to sampling
-            "trigger_server_request" => {
+            "trigger_sampling_request" => {
                 let Some(ref send_request) = self.send_request else {
+                    eprintln!("No send_request field");
                     return Err(ServerError::MissingMethod);
                 };
-                let params = Some(serde_json::json!({
+
+                let Some(params) = params else {
+                    eprintln!("Params missing from sampling spec");
+                    return Err(ServerError::MissingMethod);
+                };
+
+                let expected_response: ExpectedResponse = serde_json::from_value(params)?;
+
+                let params = serde_json::json!({
                   "messages": [
                     {
                       "role": "user",
@@ -220,8 +204,10 @@ impl ServerRequestHandler for Handler {
                   },
                   "systemPrompt": "You are a helpful assistant.",
                   "maxTokens": 100
-                }));
-                send_request("sampling/createMessage", params)?;
+                });
+
+                send_request("sampling/createMessage", params, expected_response)?;
+
                 Ok(None)
             },
             "store_mock_prompts" => {
@@ -252,8 +238,8 @@ impl ServerRequestHandler for Handler {
                     acc
                 });
                 if !is_first_mock {
-                    if let Some(sender) = &self.send_request {
-                        let _ = sender("notifications/prompts/list_changed", None);
+                    if let Some(sender) = &self.send_notification {
+                        let _ = sender("notifications/prompts/list_changed");
                     }
                 }
                 Ok(None)
@@ -320,8 +306,22 @@ impl ServerRequestHandler for Handler {
 
     // This is a test path relevant only to sampling
     async fn handle_response(&self, resp: JsonRpcResponse) -> Result<(), ServerError> {
-        let JsonRpcResponse { id, .. } = resp;
-        let _pending = self.pending_request.as_ref().and_then(|f| f(id));
+        let JsonRpcResponse { id, result, error, .. } = resp;
+        match self.pending_request.as_ref().and_then(|f| f(id)) {
+            Some((_request, ExpectedResponse::Success(expected))) => {
+                if let Some(result) = result {
+                    assert_eq!(result, expected, "expecte result: {expected:?}, found {result:?}")
+                }
+                assert!(error.is_none());
+            },
+            Some((_request, ExpectedResponse::Failure { message: expected })) => {
+                if let Some(JsonRpcError { message, .. }) = error {
+                    assert_eq!(message, expected, "expected error: {expected:?}, found {message:?}")
+                }
+                assert!(result.is_none());
+            },
+            None => todo!(),
+        }
         Ok(())
     }
 

@@ -37,12 +37,26 @@ pub type Request = serde_json::Value;
 pub type Response = Option<serde_json::Value>;
 pub type InitializedServer = JoinHandle<Result<(), ServerError>>;
 
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub enum ExpectedResponse {
+    Success(serde_json::Value),
+    Failure { message: String },
+}
+
 pub trait PreServerRequestHandler {
-    fn register_pending_request_callback(&mut self, cb: impl Fn(u64) -> Option<JsonRpcRequest> + Send + Sync + 'static);
+    fn register_pending_request_callback(
+        &mut self,
+        cb: impl Fn(u64) -> Option<(JsonRpcRequest, ExpectedResponse)> + Send + Sync + 'static,
+    );
+
+    /// Invoked during initialization with a closure `cb` that can be called to to se
     fn register_send_request_callback(
         &mut self,
-        cb: impl Fn(&str, Option<serde_json::Value>) -> Result<(), ServerError> + Send + Sync + 'static,
+        cb: impl Fn(&str, serde_json::Value, ExpectedResponse) -> Result<(), ServerError> + Send + Sync + 'static,
     );
+
+    /// Invoked during initialization with a closure `cb` that can be called to to se
+    fn register_notification_callback(&mut self, cb: impl Fn(&str) -> Result<(), ServerError> + Send + Sync + 'static);
 }
 
 #[async_trait::async_trait]
@@ -57,7 +71,7 @@ pub struct Server<T: Transport, H: ServerRequestHandler> {
     transport: Option<Arc<T>>,
     handler: Option<H>,
     #[allow(dead_code)]
-    pending_requests: Arc<Mutex<HashMap<u64, JsonRpcRequest>>>,
+    pending_requests: Arc<Mutex<HashMap<u64, (JsonRpcRequest, ExpectedResponse)>>>,
     #[allow(dead_code)]
     current_id: Arc<AtomicU64>,
 }
@@ -94,55 +108,68 @@ where
 {
     pub fn new(mut handler: H, stdin: Stdin, stdout: Stdout) -> Result<Self, ServerError> {
         let transport = Arc::new(JsonRpcStdioTransport::server(stdin, stdout)?);
-        let pending_requests = Arc::new(Mutex::new(HashMap::<u64, JsonRpcRequest>::new()));
-        let pending_requests_clone_one = pending_requests.clone();
+        let pending_requests = Arc::new(Mutex::new(HashMap::<u64, (JsonRpcRequest, ExpectedResponse)>::new()));
         let current_id = Arc::new(AtomicU64::new(0));
-        let pending_request_getter = move |id: u64| -> Option<JsonRpcRequest> {
-            match pending_requests_clone_one.lock() {
-                Ok(mut p) => p.remove(&id),
-                Err(_) => None,
+
+        handler.register_pending_request_callback({
+            let pending_requests = pending_requests.clone();
+
+            move |id: u64| -> Option<(JsonRpcRequest, ExpectedResponse)> {
+                match pending_requests.lock() {
+                    Ok(mut p) => p.remove(&id),
+                    Err(_) => None,
+                }
             }
-        };
-        handler.register_pending_request_callback(pending_request_getter);
-        let transport_clone = transport.clone();
-        let pending_request_clone_two = pending_requests.clone();
-        let current_id_clone = current_id.clone();
-        let request_sender = move |method: &str, params: Option<serde_json::Value>| -> Result<(), ServerError> {
-            let id = current_id_clone.fetch_add(1, Ordering::SeqCst);
-            let msg = match method.split_once("/") {
-                Some(("request", _)) => {
-                    let request = JsonRpcRequest {
-                        jsonrpc: JsonRpcVersion::default(),
-                        id,
-                        method: method.to_owned(),
-                        params,
-                    };
-                    let msg = JsonRpcMessage::Request(request.clone());
-                    #[allow(clippy::map_err_ignore)]
-                    let mut pending_request = pending_request_clone_two.lock().map_err(|_| ServerError::MutexError)?;
-                    pending_request.insert(id, request);
-                    Some(msg)
-                },
-                Some(("notifications", _)) => {
-                    let notif = JsonRpcNotification {
-                        jsonrpc: JsonRpcVersion::default(),
-                        method: method.to_owned(),
-                        params,
-                    };
-                    let msg = JsonRpcMessage::Notification(notif);
-                    Some(msg)
-                },
-                _ => None,
-            };
-            if let Some(msg) = msg {
-                let transport = transport_clone.clone();
+        });
+
+        handler.register_send_request_callback({
+            let pending_requests = pending_requests.clone();
+            let current_id = current_id.clone();
+            let transport = transport.clone();
+
+            move |method: &str, params: serde_json::Value, response: ExpectedResponse| -> Result<(), ServerError> {
+                let id = current_id.fetch_add(1, Ordering::SeqCst);
+                assert!(method.starts_with("request/") || method.starts_with("sampling/"));
+
+                let request = JsonRpcRequest {
+                    jsonrpc: JsonRpcVersion::default(),
+                    id,
+                    method: method.to_owned(),
+                    params: Some(params),
+                };
+                let msg = JsonRpcMessage::Request(request.clone());
+
+                #[allow(clippy::map_err_ignore)]
+                let mut pending_request = pending_requests.lock().map_err(|_| ServerError::MutexError)?;
+                pending_request.insert(id, (request, response));
+
+                let transport = transport.clone();
                 tokio::task::spawn(async move {
                     let _ = transport.send(&msg).await;
                 });
+                Ok(())
             }
-            Ok(())
-        };
-        handler.register_send_request_callback(request_sender);
+        });
+
+        handler.register_notification_callback({
+            let transport = transport.clone();
+
+            move |method: &str| -> Result<(), ServerError> {
+                assert!(method.starts_with("notifications/"));
+                let notif = JsonRpcNotification {
+                    jsonrpc: JsonRpcVersion::default(),
+                    method: method.to_owned(),
+                    params: None,
+                };
+                let msg = JsonRpcMessage::Notification(notif);
+                let transport = transport.clone();
+                tokio::task::spawn(async move {
+                    let _ = transport.send(&msg).await;
+                });
+                Ok(())
+            }
+        });
+
         let server = Self {
             transport: Some(transport),
             handler: Some(handler),
@@ -187,6 +214,7 @@ async fn process_request<T, H>(
     T: Transport,
     H: ServerRequestHandler,
 {
+    eprintln!("NDM process_request: {request:?}");
     match request {
         Ok(msg) if msg.is_initialize() => {
             let id = msg.id().unwrap_or_default();

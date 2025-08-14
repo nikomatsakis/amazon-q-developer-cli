@@ -1,6 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
-use super::facilitator_types::{MessageContent, Role};
+use super::facilitator_types::{
+    MessageContent,
+    Role,
+};
 
 // Message types for MCP sampling communication between actors.
 //
@@ -44,8 +50,8 @@ pub struct SamplingRequest {
 /// Reference: [MCP specification](https://github.com/modelcontextprotocol/specification/blob/main/docs/specification/2025-06-18/schema.mdx#samplingmessage)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpSamplingMessage {
-    pub role: Role,                  // Now uses existing Role enum
-    pub content: MessageContent,     // Now uses existing MessageContent enum
+    pub role: Role,              // Now uses existing Role enum
+    pub content: MessageContent, // Now uses existing MessageContent enum
 }
 
 /// Model preferences from MCP sampling request
@@ -205,9 +211,7 @@ pub fn format_sampling_response(response: SamplingResponse) -> Result<McpSamplin
         SamplingResponse::Approved { llm_response, .. } => {
             Ok(McpSamplingCreateMessageResult {
                 role: Role::Assistant,
-                content: MessageContent::Text {
-                    text: llm_response,
-                },
+                content: MessageContent::Text { text: llm_response },
                 model: "amazon-q".to_string(), // TODO: Use actual model name from Q CLI
                 stop_reason: None,             // Phase 1: not provided
                 meta: None,

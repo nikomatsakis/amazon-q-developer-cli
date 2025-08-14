@@ -3,23 +3,29 @@
 //! This module contains all the functionality for handling MCP sampling requests,
 //! including user approval dialogs, request editing, and response generation.
 
+use std::collections::VecDeque;
+use std::sync::Arc;
+
 use eyre;
 use regex::Regex;
-use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::Mutex;
 
+use crate::cli::chat::ConversationState;
+use crate::cli::chat::parser::{
+    ResponseEvent,
+    SendMessageStream,
+};
 use crate::mcp_client::{
-    McpSamplingMessage, MessageContent, Prompt, SamplingApproval, SamplingRequest, SamplingResponse,
+    McpSamplingMessage,
+    MessageContent,
+    Prompt,
+    Role,
+    SamplingApproval,
+    SamplingRequest,
+    SamplingResponse,
 };
 use crate::os::Os;
 use crate::util::choose;
-use crate::{
-    cli::chat::{
-        ConversationState,
-        parser::{ResponseEvent, SendMessageStream},
-    },
-    mcp_client::Role,
-};
 
 /// Call the LLM for a sampling request
 ///
@@ -104,10 +110,11 @@ async fn call_llm_for_sampling(request: &SamplingRequest, os: &Os) -> Result<Str
     Ok(response_text.trim().to_string())
 }
 
-/// Convert a series of sampling messages into a set of prompts suitable for appending to a conversation.
-/// For reasons I don't entirely know, `ConversationState::append_prompts` expects user/assistant messages to come
-/// in pairs, and we enforce that invariant, concatenating consequence user/assisstant messages together.
-/// Returns `Err` if the final message is not a user message.
+/// Convert a series of sampling messages into a set of prompts suitable for appending to a
+/// conversation. For reasons I don't entirely know, `ConversationState::append_prompts` expects
+/// user/assistant messages to come in pairs, and we enforce that invariant, concatenating
+/// consequence user/assisstant messages together. Returns `Err` if the final message is not a user
+/// message.
 fn sampling_messages_to_prompt(msgs: &[McpSamplingMessage]) -> Result<VecDeque<Prompt>, String> {
     // First pass, create pairs of roles and strings
     let mut pairs: Vec<(Role, String)> = Vec::new();
@@ -465,10 +472,20 @@ pub fn parse_edited_sampling_content(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        delimiter,
+        format_sampling_request_for_editor,
+        parse_edited_sampling_content,
+    };
     use crate::cli::agent::Agent;
     use crate::cli::chat::tool_manager::sampling::sampling_messages_to_prompt;
-    use crate::mcp_client::{McpSamplingMessage, MessageContent, Prompt, Role, SamplingRequest};
-    use super::{format_sampling_request_for_editor, parse_edited_sampling_content, delimiter};
+    use crate::mcp_client::{
+        McpSamplingMessage,
+        MessageContent,
+        Prompt,
+        Role,
+        SamplingRequest,
+    };
 
     macro_rules! assert_json_eq {
         ($left:expr, $right:expr, $($msg:tt)*) => {
@@ -782,7 +799,7 @@ That's a simple ```main``` function.
         let parsed = parse_edited_sampling_content(content, &original_request).unwrap();
 
         assert_eq!(parsed.messages.len(), 2);
-        
+
         if let MessageContent::Text { text } = &parsed.messages[0].content {
             assert_eq!(text, "Here's some code: ```rust\nfn main() {}\n```\n");
         } else {
@@ -882,21 +899,22 @@ No delimiters here
     #[test]
     fn test_round_trip_format_and_parse() {
         let original_request = create_test_sampling_request();
-        
+
         // Format the request
         let formatted = format_sampling_request_for_editor(&original_request).unwrap();
-        
+
         // Parse it back
         let parsed = parse_edited_sampling_content(&formatted, &original_request).unwrap();
-        
+
         // Should have the same messages (content-wise)
         assert_eq!(parsed.messages.len(), original_request.messages.len());
-        
+
         for (original, parsed) in original_request.messages.iter().zip(parsed.messages.iter()) {
             assert_eq!(original.role, parsed.role);
-            
-            if let (MessageContent::Text { text: orig_text }, MessageContent::Text { text: parsed_text }) = 
-                (&original.content, &parsed.content) {
+
+            if let (MessageContent::Text { text: orig_text }, MessageContent::Text { text: parsed_text }) =
+                (&original.content, &parsed.content)
+            {
                 // The parsed version will have a trailing newline if the original didn't
                 let expected_text = if orig_text.ends_with('\n') {
                     orig_text.clone()
@@ -908,7 +926,7 @@ No delimiters here
                 panic!("Expected text content in both messages");
             }
         }
-        
+
         // Metadata should be preserved
         assert_eq!(parsed.server_name, original_request.server_name);
         assert_eq!(parsed.request_id, original_request.request_id);

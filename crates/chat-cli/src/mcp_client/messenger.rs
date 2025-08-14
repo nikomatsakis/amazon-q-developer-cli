@@ -4,9 +4,9 @@ use super::{
     PromptsListResult,
     ResourceTemplatesListResult,
     ResourcesListResult,
-    ToolsListResult,
     SamplingRequest,
     SamplingResponse,
+    ToolsListResult,
 };
 
 /// An interface that abstracts the implementation for information delivery from client and its
@@ -40,15 +40,20 @@ pub trait Messenger: std::fmt::Debug + Send + Sync + 'static {
     async fn send_init_msg(&self) -> Result<(), MessengerError>;
 
     /// Sends a sampling request from an MCP server to the UI for user approval
-    /// 
+    ///
     /// This method delivers sampling requests that need user approval and provides
     /// a response channel for the UI Actor to send back the approval decision.
-    /// The response channel enables bidirectional communication: MCP Server → UI Actor → MCP Server.
-    /// 
+    /// The response channel enables bidirectional communication: MCP Server → UI Actor → MCP
+    /// Server.
+    ///
     /// # Arguments
     /// * `request` - The sampling request containing messages and preferences
     /// * `response_tx` - One-shot channel for receiving the user's approval decision
-    async fn send_sampling_request(&self, request: SamplingRequest, response_tx: tokio::sync::oneshot::Sender<SamplingResponse>) -> Result<(), MessengerError>;
+    async fn send_sampling_request(
+        &self,
+        request: SamplingRequest,
+        response_tx: tokio::sync::oneshot::Sender<SamplingResponse>,
+    ) -> Result<(), MessengerError>;
 
     /// Creates a duplicate of the messenger object
     /// This function is used to create a new instance of the messenger with the same configuration
@@ -92,7 +97,11 @@ impl Messenger for NullMessenger {
         Ok(())
     }
 
-    async fn send_sampling_request(&self, _request: SamplingRequest, _response_tx: tokio::sync::oneshot::Sender<SamplingResponse>) -> Result<(), MessengerError> {
+    async fn send_sampling_request(
+        &self,
+        _request: SamplingRequest,
+        _response_tx: tokio::sync::oneshot::Sender<SamplingResponse>,
+    ) -> Result<(), MessengerError> {
         Ok(())
     }
 
