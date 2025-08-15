@@ -7,7 +7,22 @@ use chat_cli::{
     self, ExpectedResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcStdioTransport,
     PreServerRequestHandler, Response, Server, ServerError, ServerRequestHandler,
 };
+use clap::Parser;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+mod script;
+
+#[derive(Parser)]
+#[command(name = "test_mcp_server")]
+struct Args {
+    /// Mock tool spec as JSON string
+    #[arg(long)]
+    mock_tool_spec: Option<String>,
+    /// Mock prompts as JSON string
+    #[arg(long)]
+    mock_prompts: Option<String>,
+}
 
 #[derive(Default)]
 struct Handler {
@@ -100,34 +115,18 @@ impl ServerRequestHandler for Handler {
                 };
                 Ok(result)
             },
+
             "store_mock_tool_spec" => {
                 let Some(params) = params else {
                     eprintln!("Params missing from store mock tool spec");
                     return Ok(None);
                 };
-                // expecting a mock_specs: { key: String, value: serde_json::Value }[];
-                let Ok(mock_specs) = serde_json::from_value::<Vec<serde_json::Value>>(params) else {
-                    eprintln!("Failed to convert to mock specs from value");
-                    return Ok(None);
-                };
-                eprintln!("mock_specs = {mock_specs:#?}");
-                let self_tool_specs = self.tool_spec.lock().await;
-                let mut self_tool_spec_key_list = self.tool_spec_key_list.lock().await;
-                let _ = mock_specs.iter().fold(self_tool_specs, |mut acc, spec| {
-                    let Some(key) = spec.get("key").cloned() else {
-                        return acc;
-                    };
-                    let Ok(key) = serde_json::from_value::<String>(key) else {
-                        eprintln!("Failed to convert serde value to string for key");
-                        return acc;
-                    };
-                    self_tool_spec_key_list.push(key.clone());
-                    acc.insert(key, spec.get("value").cloned());
-                    acc
-                });
-                eprintln!("self_tool_spec_key_list = {self_tool_spec_key_list:#?}");
+
+                self.store_mock_tool_spec(params).await?;
+
                 Ok(None)
             },
+
             "tools/list" => {
                 let tool_spec_key_list = self.tool_spec_key_list.lock().await;
                 let tool_spec = self.tool_spec.lock().await;
@@ -210,40 +209,7 @@ impl ServerRequestHandler for Handler {
 
                 Ok(None)
             },
-            "store_mock_prompts" => {
-                let Some(params) = params else {
-                    eprintln!("Params missing from store mock prompts");
-                    return Ok(None);
-                };
-                // expecting a mock_prompts: { key: String, value: serde_json::Value }[];
-                let Ok(mock_prompts) = serde_json::from_value::<Vec<serde_json::Value>>(params) else {
-                    eprintln!("Failed to convert to mock specs from value");
-                    return Ok(None);
-                };
-                let mut self_prompts = self.prompts.lock().await;
-                let mut self_prompt_key_list = self.prompt_key_list.lock().await;
-                let is_first_mock = self_prompts.is_empty();
-                self_prompts.clear();
-                self_prompt_key_list.clear();
-                let _ = mock_prompts.iter().fold(self_prompts, |mut acc, spec| {
-                    let Some(key) = spec.get("key").cloned() else {
-                        return acc;
-                    };
-                    let Ok(key) = serde_json::from_value::<String>(key) else {
-                        eprintln!("Failed to convert serde value to string for key");
-                        return acc;
-                    };
-                    self_prompt_key_list.push(key.clone());
-                    acc.insert(key, spec.get("value").cloned());
-                    acc
-                });
-                if !is_first_mock {
-                    if let Some(sender) = &self.send_notification {
-                        let _ = sender("notifications/prompts/list_changed");
-                    }
-                }
-                Ok(None)
-            },
+            "store_mock_prompts" => self.store_mock_prompts(params).await,
             "prompts/list" => {
                 // We expect this method to be called after the mock prompts have already been
                 // stored.
@@ -330,9 +296,87 @@ impl ServerRequestHandler for Handler {
     }
 }
 
+impl Handler {
+    async fn store_mock_prompts(&self, params: serde_json::Value) -> Result<(), ServerError> {
+        // expecting a mock_prompts: { key: String, value: serde_json::Value }[];
+        let Ok(mock_prompts) = serde_json::from_value::<Vec<serde_json::Value>>(params) else {
+            eprintln!("Failed to convert to mock specs from value");
+            return Ok(());
+        };
+        let mut self_prompts = self.prompts.lock().await;
+        let mut self_prompt_key_list = self.prompt_key_list.lock().await;
+        let is_first_mock = self_prompts.is_empty();
+        self_prompts.clear();
+        self_prompt_key_list.clear();
+        let _ = mock_prompts.iter().fold(self_prompts, |mut acc, spec| {
+            let Some(key) = spec.get("key").cloned() else {
+                return acc;
+            };
+            let Ok(key) = serde_json::from_value::<String>(key) else {
+                eprintln!("Failed to convert serde value to string for key");
+                return acc;
+            };
+            self_prompt_key_list.push(key.clone());
+            acc.insert(key, spec.get("value").cloned());
+            acc
+        });
+        if !is_first_mock {
+            if let Some(sender) = &self.send_notification {
+                let _ = sender("notifications/prompts/list_changed");
+            }
+        }
+        Ok(())
+    }
+
+    async fn store_mock_tool_spec(&self, params: serde_json::Value) -> Result<(), ServerError> {
+        // expecting a mock_specs: { key: String, value: serde_json::Value }[];
+        let Ok(mock_specs) = serde_json::from_value::<Vec<serde_json::Value>>(params) else {
+            eprintln!("Failed to convert to mock specs from value");
+            return Ok(());
+        };
+        eprintln!("mock_specs = {mock_specs:#?}");
+        let self_tool_specs = self.tool_spec.lock().await;
+        let mut self_tool_spec_key_list = self.tool_spec_key_list.lock().await;
+        let _ = mock_specs.iter().fold(self_tool_specs, |mut acc, spec| {
+            let Some(key) = spec.get("key").cloned() else {
+                return acc;
+            };
+            let Ok(key) = serde_json::from_value::<String>(key) else {
+                eprintln!("Failed to convert serde value to string for key");
+                return acc;
+            };
+            self_tool_spec_key_list.push(key.clone());
+            acc.insert(key, spec.get("value").cloned());
+            acc
+        });
+        eprintln!("self_tool_spec_key_list = {self_tool_spec_key_list:#?}");
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
     let handler = Handler::default();
+
+    if let Some(mock_tool_spec_str) = args.mock_tool_spec {
+        let mock_tool_spec: serde_json::Value =
+            serde_json::from_str(&mock_tool_spec_str).expect("Failed to parse mock-tool-spec as JSON");
+        handler
+            .store_mock_tool_spec(mock_tool_spec)
+            .await
+            .expect("Failed to store mock tool spec");
+    }
+
+    if let Some(mock_prompts_str) = args.mock_prompts {
+        let mock_prompts: serde_json::Value =
+            serde_json::from_str(&mock_prompts_str).expect("Failed to parse mock-prompts as JSON");
+        handler
+            .store_mock_prompts(mock_prompts)
+            .await
+            .expect("Failed to store mock prompts");
+    }
+
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let test_server = Server::<JsonRpcStdioTransport, _>::new(handler, stdin, stdout).expect("Failed to create server");
