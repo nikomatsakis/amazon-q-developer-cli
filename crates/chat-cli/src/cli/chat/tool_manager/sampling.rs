@@ -11,18 +11,9 @@ use regex::Regex;
 use tokio::sync::Mutex;
 
 use crate::cli::chat::ConversationState;
-use crate::cli::chat::parser::{
-    ResponseEvent,
-    SendMessageStream,
-};
+use crate::cli::chat::parser::{ResponseEvent, SendMessageStream};
 use crate::mcp_client::{
-    McpSamplingMessage,
-    MessageContent,
-    Prompt,
-    Role,
-    SamplingApproval,
-    SamplingRequest,
-    SamplingResponse,
+    McpSamplingMessage, MessageContent, Prompt, Role, SamplingApproval, SamplingRequest, SamplingResponse,
 };
 use crate::os::Os;
 use crate::util::choose;
@@ -50,6 +41,7 @@ async fn call_llm_for_sampling(request: &SamplingRequest, os: &Os) -> Result<Str
         std::collections::HashMap::new(),     // No tools for sampling
         crate::cli::chat::tool_manager::ToolManager::default(), // Empty tool manager
         None,                                 // FIXME: Use model from request.model_preferences when available
+        os,
     )
     .await;
 
@@ -472,20 +464,10 @@ pub fn parse_edited_sampling_content(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        delimiter,
-        format_sampling_request_for_editor,
-        parse_edited_sampling_content,
-    };
+    use super::{delimiter, format_sampling_request_for_editor, parse_edited_sampling_content};
     use crate::cli::agent::Agent;
     use crate::cli::chat::tool_manager::sampling::sampling_messages_to_prompt;
-    use crate::mcp_client::{
-        McpSamplingMessage,
-        MessageContent,
-        Prompt,
-        Role,
-        SamplingRequest,
-    };
+    use crate::mcp_client::{McpSamplingMessage, MessageContent, Prompt, Role, SamplingRequest};
 
     macro_rules! assert_json_eq {
         ($left:expr, $right:expr, $($msg:tt)*) => {

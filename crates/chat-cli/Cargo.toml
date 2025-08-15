@@ -145,6 +145,7 @@ mockito.workspace = true
 paste.workspace = true
 predicates.workspace = true
 tracing-test.workspace = true
+chat-script = { path = "../chat-script" }
 
 [build-dependencies]
 convert_case.workspace = true
