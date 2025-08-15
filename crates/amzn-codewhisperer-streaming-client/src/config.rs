@@ -1110,7 +1110,9 @@ impl Builder {
     /// # Examples
     ///
     /// Set the behavior major version to `latest`. This is equivalent to enabling the
-    /// `behavior-version-latest` cargo feature. ```no_run
+    /// `behavior-version-latest` cargo feature.
+    ///
+    /// ```no_run
     /// use amzn_codewhisperer_streaming_client::config::BehaviorVersion;
     ///
     /// let config = amzn_codewhisperer_streaming_client::Config::builder()
@@ -1119,8 +1121,9 @@ impl Builder {
     ///     .build();
     /// let client = amzn_codewhisperer_streaming_client::Client::from_conf(config);
     /// ```
-    /// 
+    ///
     /// Customizing behavior major version:
+    ///
     /// ```no_run
     /// use amzn_codewhisperer_streaming_client::config::BehaviorVersion;
     ///
@@ -1145,7 +1148,9 @@ impl Builder {
     /// # Examples
     ///
     /// Set the behavior major version to `latest`. This is equivalent to enabling the
-    /// `behavior-version-latest` cargo feature. ```no_run
+    /// `behavior-version-latest` cargo feature.
+    ///
+    /// ```no_run
     /// use amzn_codewhisperer_streaming_client::config::BehaviorVersion;
     ///
     /// let config = amzn_codewhisperer_streaming_client::Config::builder()
@@ -1154,8 +1159,9 @@ impl Builder {
     ///     .build();
     /// let client = amzn_codewhisperer_streaming_client::Client::from_conf(config);
     /// ```
-    /// 
+    ///
     /// Customizing behavior major version:
+    ///
     /// ```no_run
     /// use amzn_codewhisperer_streaming_client::config::BehaviorVersion;
     ///
@@ -1426,40 +1432,18 @@ pub(crate) fn base_client_runtime_plugins(
     plugins
 }
 
-pub use ::aws_credential_types::provider::token::{
-    ProvideToken,
-    SharedTokenProvider,
-};
-pub use ::aws_smithy_async::rt::sleep::{
-    AsyncSleep,
-    SharedAsyncSleep,
-};
+pub use ::aws_credential_types::provider::token::{ProvideToken, SharedTokenProvider};
+pub use ::aws_smithy_async::rt::sleep::{AsyncSleep, SharedAsyncSleep};
 pub use ::aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
-pub use ::aws_smithy_runtime_api::client::http::{
-    HttpClient,
-    SharedHttpClient,
-};
+pub use ::aws_smithy_runtime_api::client::http::{HttpClient, SharedHttpClient};
 pub use ::aws_smithy_runtime_api::client::identity::http::Token;
-pub use ::aws_smithy_runtime_api::client::identity::{
-    ResolveCachedIdentity,
-    ResolveIdentity,
-    SharedIdentityCache,
-};
-pub use ::aws_smithy_runtime_api::client::interceptors::{
-    Intercept,
-    SharedInterceptor,
-};
+pub use ::aws_smithy_runtime_api::client::identity::{ResolveCachedIdentity, ResolveIdentity, SharedIdentityCache};
+pub use ::aws_smithy_runtime_api::client::interceptors::{Intercept, SharedInterceptor};
 pub use ::aws_smithy_runtime_api::client::runtime_components::RuntimeComponentsBuilder;
-pub use ::aws_smithy_runtime_api::client::runtime_plugin::{
-    RuntimePlugin,
-    SharedRuntimePlugin,
-};
+pub use ::aws_smithy_runtime_api::client::runtime_plugin::{RuntimePlugin, SharedRuntimePlugin};
 pub use ::aws_smithy_runtime_api::client::stalled_stream_protection::StalledStreamProtectionConfig;
 pub use ::aws_smithy_runtime_api::shared::IntoShared;
-pub use ::aws_smithy_types::config_bag::{
-    FrozenLayer,
-    Layer,
-};
+pub use ::aws_smithy_types::config_bag::{FrozenLayer, Layer};
 
 /// Types needed to configure endpoint resolution.
 pub mod endpoint;
