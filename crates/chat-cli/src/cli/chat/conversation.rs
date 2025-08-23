@@ -741,10 +741,7 @@ impl ConversationState {
     }
 
     pub fn append_assistant_transcript(&mut self, message: &AssistantMessage) {
-        let tool_uses = message.tool_uses().map_or("none".to_string(), |tools| {
-            tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>().join(",")
-        });
-        self.append_transcript(format!("{}\n[Tool uses: {tool_uses}]", message.content()));
+        self.append_transcript(message.content().to_string());
     }
 
     pub fn append_transcript(&mut self, message: String) {
