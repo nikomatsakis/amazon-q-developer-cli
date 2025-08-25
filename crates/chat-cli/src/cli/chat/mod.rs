@@ -3613,6 +3613,58 @@ mod tests {
         // In a real implementation, we'd capture and verify the final response contains "Athens"
     }
 
+    #[tokio::test]
+    async fn test_mock_llm_integration() {
+        // Test the MockLLM integration with spawn_mock_llm
+        use crate::mock_llm::{spawn_mock_llm, MockLLMContext};
+        use serde_json::json;
+        
+        let mut mock_llm = spawn_mock_llm(|mut ctx: MockLLMContext| async move {
+            if let Some(user_msg) = ctx.read_user_message().await {
+                if user_msg.contains("Greece") {
+                    ctx.respond_to_user("I'll look up Greece's capital.".to_string()).await.unwrap();
+                    ctx.call_tool("1".to_string(), "countryCapital".to_string(), json!({"country": "Greece"})).await.unwrap();
+                    // In a real scenario, we'd wait for tool result and then respond
+                    ctx.respond_to_user("The capital of Greece is Athens.".to_string()).await.unwrap();
+                } else {
+                    ctx.respond_to_user("I don't know about that.".to_string()).await.unwrap();
+                }
+            }
+        });
+        
+        // Send user message
+        mock_llm.send_user_message("What is the capital of Greece?".to_string()).await.unwrap();
+        
+        // Read responses
+        let response1 = mock_llm.read_llm_response().await.unwrap();
+        let response2 = mock_llm.read_llm_response().await.unwrap();
+        let response3 = mock_llm.read_llm_response().await.unwrap();
+        
+        // Verify responses
+        match response1 {
+            crate::api_client::model::ChatResponseStream::AssistantResponseEvent { content } => {
+                assert_eq!(content, "I'll look up Greece's capital.");
+            },
+            _ => panic!("Expected AssistantResponseEvent"),
+        }
+        
+        match response2 {
+            crate::api_client::model::ChatResponseStream::ToolUseEvent { name, .. } => {
+                assert_eq!(name, "countryCapital");
+            },
+            _ => panic!("Expected ToolUseEvent"),
+        }
+        
+        match response3 {
+            crate::api_client::model::ChatResponseStream::AssistantResponseEvent { content } => {
+                assert_eq!(content, "The capital of Greece is Athens.");
+            },
+            _ => panic!("Expected AssistantResponseEvent"),
+        }
+        
+        println!("MockLLM integration test completed!");
+    }
+
     #[test]
     fn test_does_input_reference_file() {
         let tests = &[
