@@ -17,6 +17,7 @@ use chat_cli::{
     ServerError,
     ServerRequestHandler,
 };
+use chat_script::{Scripts, ScriptEnvironment};
 use tokio::sync::Mutex;
 
 #[derive(Default)]
@@ -30,6 +31,7 @@ struct Handler {
     prompts: Mutex<HashMap<String, Response>>,
     prompt_key_list: Mutex<Vec<String>>,
     prompt_list_call_no: AtomicU8,
+    scripts: Mutex<Option<Scripts>>,
 }
 
 impl PreServerRequestHandler for Handler {
@@ -194,36 +196,6 @@ impl ServerRequestHandler for Handler {
                 });
                 Ok(Some(serde_json::json!(kv)))
             },
-            // This is a test path relevant only to sampling
-            "trigger_server_request" => {
-                let Some(ref send_request) = self.send_request else {
-                    return Err(ServerError::MissingMethod);
-                };
-                let params = Some(serde_json::json!({
-                  "messages": [
-                    {
-                      "role": "user",
-                      "content": {
-                        "type": "text",
-                        "text": "What is the capital of France?"
-                      }
-                    }
-                  ],
-                  "modelPreferences": {
-                    "hints": [
-                      {
-                        "name": "claude-3-sonnet"
-                      }
-                    ],
-                    "intelligencePriority": 0.8,
-                    "speedPriority": 0.5
-                  },
-                  "systemPrompt": "You are a helpful assistant.",
-                  "maxTokens": 100
-                }));
-                send_request("sampling/createMessage", params)?;
-                Ok(None)
-            },
             "store_mock_prompts" => {
                 let Some(params) = params else {
                     eprintln!("Params missing from store mock prompts");
@@ -257,6 +229,91 @@ impl ServerRequestHandler for Handler {
                     }
                 }
                 Ok(None)
+            },
+            "set_test_script" => {
+                let Some(params) = params else {
+                    eprintln!("Params missing from set_test_script");
+                    return Ok(None);
+                };
+                
+                // Parse the scripts from the params
+                let Ok(scripts) = serde_json::from_value::<Scripts>(params) else {
+                    eprintln!("Failed to parse scripts from params");
+                    return Ok(None);
+                };
+                
+                // Store the scripts
+                let mut self_scripts = self.scripts.lock().await;
+                *self_scripts = Some(scripts);
+                
+                eprintln!("Test script loaded successfully");
+                Ok(None)
+            },
+            "run_test_script" => {
+                let script_name = if let Some(params) = params {
+                    params.get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("main")
+                        .to_string()
+                } else {
+                    "main".to_string()
+                };
+                
+                let scripts_guard = self.scripts.lock().await;
+                let Some(scripts) = scripts_guard.as_ref() else {
+                    eprintln!("No test script loaded");
+                    return Err(ServerError::MissingMethod);
+                };
+                
+                // Execute the script
+                let arguments = std::collections::BTreeMap::new();
+                match scripts.execute_if_exists(&script_name, arguments, self).await {
+                    Ok(result) => Ok(result),
+                    Err(e) => {
+                        eprintln!("Script execution failed: {e}");
+                        Err(ServerError::MissingMethod)
+                    }
+                }
+            },
+            "tools/call" => {
+                let Some(params) = params else {
+                    eprintln!("Params missing from tools/call");
+                    return Err(ServerError::MissingMethod);
+                };
+                
+                let Some(tool_name) = params.get("name").and_then(|v| v.as_str()) else {
+                    eprintln!("Tool name missing from tools/call");
+                    return Err(ServerError::MissingMethod);
+                };
+                
+                let tool_arguments = params.get("arguments")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_else(std::collections::BTreeMap::new);
+                
+                let scripts_guard = self.scripts.lock().await;
+                let Some(scripts) = scripts_guard.as_ref() else {
+                    eprintln!("No scripts loaded for tool execution");
+                    return Err(ServerError::MissingMethod);
+                };
+                
+                // Execute the script with the tool name
+                match scripts.execute_if_exists(tool_name, tool_arguments, self).await {
+                    Ok(Some(result)) => {
+                        // Return the result in MCP tools/call response format
+                        Ok(Some(serde_json::json!({
+                            "content": [{"type": "text", "text": result.to_string()}]
+                        })))
+                    },
+                    Ok(None) => {
+                        eprintln!("No script found for tool: {tool_name}");
+                        Err(ServerError::MissingMethod)
+                    },
+                    Err(e) => {
+                        eprintln!("Tool script execution failed: {e}");
+                        Err(ServerError::MissingMethod)
+                    }
+                }
             },
             "prompts/list" => {
                 // We expect this method to be called after the mock prompts have already been
@@ -326,6 +383,36 @@ impl ServerRequestHandler for Handler {
     }
 
     async fn handle_shutdown(&self) -> Result<(), ServerError> {
+        Ok(())
+    }
+}
+
+impl ScriptEnvironment for Handler {
+    fn send_sampling_request(
+        &self,
+        params: serde_json::Value,
+        response_tx: tokio::sync::oneshot::Sender<Result<serde_json::Value, serde_json::Value>>,
+    ) -> eyre::Result<()> {
+        let Some(send_request) = &self.send_request else {
+            eyre::bail!("send_request callback not registered");
+        };
+        
+        // Send the sampling request to the client
+        if let Err(e) = send_request("sampling/createMessage", Some(params)) {
+            eyre::bail!("Failed to send sampling request: {e:?}");
+        }
+        
+        // TODO: For now, we'll send a mock success response
+        // In a real implementation, we'd need to handle the async response from the client
+        let mock_response = serde_json::json!({
+            "content": [{"type": "text", "text": "Mock response from LLM"}],
+            "model": "mock-model",
+            "role": "assistant"
+        });
+        
+        // Send the response (ignore if receiver is dropped)
+        let _ = response_tx.send(Ok(mock_response));
+        
         Ok(())
     }
 }

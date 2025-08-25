@@ -1,0 +1,30 @@
+{
+  "scripts": [
+    {
+      "name": "main",
+      "arguments": [],
+      "steps": [
+        {
+          "Sampling": {
+            "params": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": {
+                    "type": "text",
+                    "text": "What is 2+2?"
+                  }
+                }
+              ]
+            },
+            "expected": {
+              "Ok": {
+                "regex": ".*4.*"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
