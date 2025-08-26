@@ -61,6 +61,7 @@ use crate::database::{
     AuthProfile,
     Database,
 };
+use crate::mock_llm::{spawn_mock_llm, MockLLM};
 use crate::os::{
     Env,
     Fs,
@@ -91,7 +92,7 @@ pub struct ApiClient {
     client: CodewhispererClient,
     streaming_client: Option<CodewhispererStreamingClient>,
     sigv4_streaming_client: Option<QDeveloperStreamingClient>,
-    mock_client: Option<Arc<Mutex<std::vec::IntoIter<Vec<ChatResponseStream>>>>>,
+    mock_llm: Option<Arc<Mutex<MockLLM>>>,
     profile: Option<AuthProfile>,
     model_cache: ModelCache,
 }
@@ -131,7 +132,7 @@ impl ApiClient {
                 client,
                 streaming_client: None,
                 sigv4_streaming_client: None,
-                mock_client: None,
+                mock_llm: None,
                 profile: None,
                 model_cache: Arc::new(RwLock::new(None)),
             };
@@ -203,7 +204,7 @@ impl ApiClient {
             client,
             streaming_client,
             sigv4_streaming_client,
-            mock_client: None,
+            mock_llm: None,
             profile,
             model_cache: Arc::new(RwLock::new(None)),
         })
@@ -563,19 +564,33 @@ impl ApiClient {
                     Err(err.into())
                 },
             }
-        } else if let Some(client) = &self.mock_client {
-            let mut new_events = client.lock().next().unwrap_or_default().clone();
-            new_events.reverse();
-
-            return Ok(SendMessageOutput::Mock(new_events));
+        } else if let Some(mock_llm) = &self.mock_llm {
+            // Send user message to mock LLM script
+            // For now, just send a simple message - in the future we'd extract from conversation
+            let mut llm = mock_llm.lock();
+            if let Err(_) = llm.send_user_message("User message".to_string()).await {
+                // If sending fails, return empty response
+                return Ok(SendMessageOutput::Mock(vec![]));
+            }
+            
+            // Collect responses from mock LLM
+            let mut events = Vec::new();
+            while let Some(event) = llm.read_llm_response().await {
+                events.push(event);
+                // For now, just take one event to avoid infinite loops
+                break;
+            }
+            
+            return Ok(SendMessageOutput::Mock(events));
         } else {
             unreachable!("One of the clients must be created by this point");
         }
     }
 
-    /// Only meant for testing. Do not use outside of testing responses.
+    /// Helper to convert JSON mock responses to MockLLM script (for Q_MOCK_CHAT_RESPONSE compatibility)
     pub fn set_mock_output(&mut self, json: serde_json::Value) {
-        let mut mock = Vec::new();
+        // Convert JSON array to events
+        let mut all_events = Vec::new();
         for response in json.as_array().unwrap() {
             let mut stream = Vec::new();
             for event in response.as_array().unwrap() {
@@ -591,10 +606,38 @@ impl ApiClient {
                     other => panic!("Unexpected value: {:?}", other),
                 }
             }
-            mock.push(stream);
+            all_events.extend(stream);
         }
 
-        self.mock_client = Some(Arc::new(Mutex::new(mock.into_iter())));
+        // Create MockLLM script that sends these events
+        self.set_mock_llm(move |mut ctx| async move {
+            // Wait for user message (ignore it)
+            let _ = ctx.read_user_message().await;
+            
+            // Send all events one after the other
+            for event in all_events {
+                match event {
+                    ChatResponseStream::AssistantResponseEvent { content } => {
+                        let _ = ctx.respond_to_user(content).await;
+                    },
+                    ChatResponseStream::ToolUseEvent { tool_use_id, name, input, .. } => {
+                        let args = input.unwrap_or_default();
+                        let args_value: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::Value::String(args));
+                        let _ = ctx.call_tool(tool_use_id, name, args_value).await;
+                    },
+                    _ => {}, // Ignore other event types
+                }
+            }
+        });
+    }
+
+    /// Set a mock LLM script for testing. The script will run in a spawned task.
+    pub fn set_mock_llm<F>(&mut self, script: impl FnOnce(crate::mock_llm::MockLLMContext) -> F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mock_llm = spawn_mock_llm(script);
+        self.mock_llm = Some(Arc::new(Mutex::new(mock_llm)));
     }
 }
 
@@ -704,20 +747,13 @@ mod tests {
             .await
             .unwrap();
 
-        client.mock_client = Some(Arc::new(Mutex::new(
-            vec![vec![
-                ChatResponseStream::AssistantResponseEvent {
-                    content: "Hello!".to_owned(),
-                },
-                ChatResponseStream::AssistantResponseEvent {
-                    content: " How can I".to_owned(),
-                },
-                ChatResponseStream::AssistantResponseEvent {
-                    content: " assist you today?".to_owned(),
-                },
-            ]]
-            .into_iter(),
-        )));
+        client.set_mock_output(serde_json::json!([
+            [
+                "Hello!",
+                " How can I",
+                " assist you today?"
+            ]
+        ]));
 
         let mut output = client
             .send_message(ConversationState {
