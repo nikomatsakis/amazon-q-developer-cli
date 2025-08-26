@@ -573,13 +573,14 @@ impl ApiClient {
                 return Ok(SendMessageOutput::Mock(vec![]));
             }
             
-            // Collect responses from mock LLM
+            // Collect ALL responses from mock LLM for this user message
             let mut events = Vec::new();
             while let Some(event) = llm.read_llm_response().await {
                 events.push(event);
-                // For now, just take one event to avoid infinite loops
-                break;
             }
+            
+            // Reverse events to match old mock_client behavior
+            events.reverse();
             
             return Ok(SendMessageOutput::Mock(events));
         } else {
@@ -589,45 +590,55 @@ impl ApiClient {
 
     /// Helper to convert JSON mock responses to MockLLM script (for Q_MOCK_CHAT_RESPONSE compatibility)
     pub fn set_mock_output(&mut self, json: serde_json::Value) {
-        // Convert JSON array to events
-        let mut all_events = Vec::new();
+        // Convert JSON array to response groups (each array element is one response)
+        let mut response_groups = Vec::new();
         for response in json.as_array().unwrap() {
-            let mut stream = Vec::new();
+            let mut events = Vec::new();
             for event in response.as_array().unwrap() {
                 match event {
                     serde_json::Value::String(assistant_text) => {
-                        stream.push(ChatResponseStream::AssistantResponseEvent {
+                        events.push(ChatResponseStream::AssistantResponseEvent {
                             content: assistant_text.clone(),
                         });
                     },
                     serde_json::Value::Object(tool_use) => {
-                        stream.append(&mut split_tool_use_event(tool_use));
+                        events.append(&mut split_tool_use_event(tool_use));
                     },
                     other => panic!("Unexpected value: {:?}", other),
                 }
             }
-            all_events.extend(stream);
+            response_groups.push(events);
         }
 
-        // Create MockLLM script that sends these events
+        // Create MockLLM script that sends one response group per user message
         self.set_mock_llm(move |mut ctx| async move {
-            // Wait for user message (ignore it)
-            let _ = ctx.read_user_message().await;
+            let mut response_index = 0;
             
-            // Send all events one after the other
-            for event in all_events {
-                match event {
-                    ChatResponseStream::AssistantResponseEvent { content } => {
-                        let _ = ctx.respond_to_user(content).await;
-                    },
-                    ChatResponseStream::ToolUseEvent { tool_use_id, name, input, .. } => {
-                        let args = input.unwrap_or_default();
-                        let args_value: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::Value::String(args));
-                        let _ = ctx.call_tool(tool_use_id, name, args_value).await;
-                    },
-                    _ => {}, // Ignore other event types
+            // Wait for user message
+            if let Some(_) = ctx.read_user_message().await {
+                // Send the corresponding response group
+                if response_index < response_groups.len() {
+                    for event in &response_groups[response_index] {
+                        match event {
+                            ChatResponseStream::AssistantResponseEvent { content } => {
+                                let _ = ctx.respond_to_user(content.clone()).await;
+                            },
+                            ChatResponseStream::ToolUseEvent { tool_use_id, name, input, .. } => {
+                                let args = input.as_ref().unwrap_or(&String::new()).clone();
+                                let args_value: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::Value::String(args));
+                                
+                                // Send streaming tool use events to match parser expectations
+                                // 1. Start event: input=None, stop=None
+                                let _ = ctx.call_tool(tool_use_id.clone(), name.clone(), None, None).await;
+                                // 2. Final event: input=Some(args), stop=Some(true)  
+                                let _ = ctx.call_tool(tool_use_id.clone(), name.clone(), Some(args_value), Some(true)).await;
+                            },
+                            _ => {}, // Ignore other event types
+                        }
+                    }
                 }
             }
+            // Script ends here, which drops the response channel and signals completion
         });
     }
 

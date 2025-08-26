@@ -65,12 +65,14 @@ impl MockLLMContext {
     }
 
     /// Send a tool call via channel
-    pub async fn call_tool(&mut self, tool_use_id: String, name: String, args: Value) -> Result<(), mpsc::error::SendError<ChatResponseStream>> {
+    pub async fn call_tool(&mut self, tool_use_id: String, name: String, args: Option<Value>, stop: Option<bool>) -> Result<(), mpsc::error::SendError<ChatResponseStream>> {
+        let input = args.map(|v| v.to_string());
+        
         self.llm_response_tx.send(ChatResponseStream::ToolUseEvent {
             tool_use_id,
             name,
-            input: Some(args.to_string()),
-            stop: Some(true),
+            input,
+            stop,
         }).await
     }
 
